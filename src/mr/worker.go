@@ -81,15 +81,15 @@ func handleMap(reply TaskReply, mapf func(string, string) []KeyValue) {
 	}
 	file.Close()
 	kva := mapf(filename, string(content))
-	reduce := make([][]KeyValue, reply.NReduce)
-	for i := 0; i < reply.NReduce; i++ {
+	reduce := make([][]KeyValue, reply.nReduce)
+	for i := 0; i < reply.nReduce; i++ {
 		reduce[i] = []KeyValue{}
 	}
 	for _, v := range kva {
-		rid := ihash(v.Key) % reply.NReduce
+		rid := ihash(v.Key) % reply.nReduce
 		reduce[rid] = append(reduce[rid], v)
 	}
-	for i := 0; i < reply.NReduce; i++ {
+	for i := 0; i < reply.nReduce; i++ {
 		writeIntermediate(reply, reduce[i])
 	}
 }
@@ -113,7 +113,7 @@ func writeIntermediate(reply TaskReply, kva []KeyValue) {
 
 func readIntermediate(reply TaskReply) []KeyValue {
 	kva := []KeyValue{}
-	for i := 0; i < reply.NMap; i++ {
+	for i := 0; i < reply.nMap; i++ {
 		filename := fmt.Sprintf("mr-%v-%v", i, reply.ReduceSeqNumber)
 		file, err := os.Open(filename)
 		if err != nil {

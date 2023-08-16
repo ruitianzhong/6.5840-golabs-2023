@@ -1,15 +1,24 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
 type Coordinator struct {
 	// Your definitions here.
-
+	nMap, nReduce, nMapDone, nReduceDone int
+	mapState, reduceState                []TaskState
+	lock                                 sync.Locker
+	files                                []string
+}
+type TaskState struct {
+	allocated, done bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -23,7 +32,102 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
+func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
+	handleDone(c, args)
+	for {
+		c.lock.Lock()
+		var taskType TaskType
+		pos := 0
+		ok := false
+		if c.nMapDone < c.nMap {
+			ok = findMapTask(c, reply)
+			taskType = MAP
+			pos = reply.MapSeqNumber
+		} else if c.nReduceDone < c.nReduce {
+			ok = findReduceTask(c, reply)
+			taskType = REDUCE
+			pos = reply.ReduceSeqNumber
+		} else {
+			taskType = NONE
+		}
+		c.lock.Unlock()
+		if ok {
+			go setTimeOut(c, taskType, pos)
+			return nil
+		}
 
+	}
+
+	return nil
+}
+
+func setTimeOut(c *Coordinator, t TaskType, pos int) {
+	time.Sleep(10 * time.Second)
+	switch t {
+	case MAP:
+		c.lock.Lock()
+		if !c.mapState[pos].done && c.mapState[pos].allocated {
+			c.mapState[pos].allocated = false
+		}
+		c.lock.Unlock()
+	case REDUCE:
+		c.lock.Lock()
+		if !c.reduceState[pos].done && c.reduceState[pos].allocated {
+			c.reduceState[pos].allocated = false
+		}
+		c.lock.Unlock()
+	default:
+		return
+	}
+}
+
+func handleDone(c *Coordinator, args *TaskArgs) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if args.ArgsType == DONE {
+
+		switch args.TaskType {
+		case MAP:
+			if !c.mapState[args.MapSeqNumber].done {
+				c.nMapDone += 1
+				c.mapState[args.MapSeqNumber].done = true
+			}
+		case REDUCE:
+			if !c.reduceState[args.ReduceSeqNumber].done {
+				c.nReduceDone += 1
+				c.reduceState[args.ReduceSeqNumber].done = true
+			}
+		}
+
+	}
+}
+
+func findReduceTask(c *Coordinator, reply *TaskReply) bool {
+	for i, v := range c.reduceState {
+		if !v.done && !v.allocated {
+			reply.ReduceSeqNumber = i
+			reply.TaskType = REDUCE
+			reply.nReduce = c.nReduce
+			c.reduceState[i].allocated = true
+			return true
+		}
+	}
+	return false
+}
+
+func findMapTask(c *Coordinator, reply *TaskReply) bool {
+	for i, v := range c.mapState {
+		if !v.done && !v.allocated {
+			reply.FileName = c.files[i]
+			reply.MapSeqNumber = i
+			reply.nMap = c.nMap
+			reply.TaskType = MAP
+			c.mapState[i].allocated = true
+			return true
+		}
+	}
+	return false
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,12 +150,12 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	return c.nReduceDone == c.nMapDone
 
 	// Your code here.
 
-
-	return ret
 }
 
 //
@@ -60,10 +164,12 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{nMap: len(files), nReduce: nReduce, lock: &sync.Mutex{}}
+	c.mapState = make([]TaskState, c.nMap)
+	c.reduceState = make([]TaskState, nReduce)
+	c.files = files
 
 	// Your code here.
-
 
 	c.server()
 	return &c

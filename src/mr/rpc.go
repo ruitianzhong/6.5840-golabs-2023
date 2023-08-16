@@ -21,22 +21,30 @@ type ExampleArgs struct {
 type ExampleReply struct {
 	Y int
 }
+type ArgsType int
+type TaskType int
 
 const (
-	NONE int = iota
-	REDUCE
+	NONE TaskType = iota
 	MAP
-	INIT
+	REDUCE
+)
+
+const (
+	INIT ArgsType = iota
 	DONE
 )
 
 type TaskArgs struct {
-	ArgsType, TaskType, MapSeqNumber, ReduceSeqNumber int
+	MapSeqNumber, ReduceSeqNumber int
+	ArgsType                      ArgsType
+	TaskType                      TaskType
 }
 
 type TaskReply struct {
-	TaskType, MapSeqNumber, ReduceSeqNumber,NMap,NReduce int
-	FileName string
+	MapSeqNumber, ReduceSeqNumber, nMap, nReduce int
+	FileName                                     string
+	TaskType                                     TaskType
 }
 
 // Add your RPC definitions here.
