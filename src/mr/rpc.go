@@ -42,7 +42,7 @@ type TaskArgs struct {
 }
 
 type TaskReply struct {
-	MapSeqNumber, ReduceSeqNumber, nMap, nReduce int
+	MapSeqNumber, ReduceSeqNumber, NMap, NReduce int // first character must be upper case
 	FileName                                     string
 	TaskType                                     TaskType
 }

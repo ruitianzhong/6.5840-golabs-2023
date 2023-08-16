@@ -58,7 +58,6 @@ func (c *Coordinator) GetTask(args *TaskArgs, reply *TaskReply) error {
 
 	}
 
-	return nil
 }
 
 func setTimeOut(c *Coordinator, t TaskType, pos int) {
@@ -107,7 +106,8 @@ func findReduceTask(c *Coordinator, reply *TaskReply) bool {
 		if !v.done && !v.allocated {
 			reply.ReduceSeqNumber = i
 			reply.TaskType = REDUCE
-			reply.nReduce = c.nReduce
+			reply.NReduce = c.nReduce
+			reply.NMap = c.nMap
 			c.reduceState[i].allocated = true
 			return true
 		}
@@ -120,8 +120,9 @@ func findMapTask(c *Coordinator, reply *TaskReply) bool {
 		if !v.done && !v.allocated {
 			reply.FileName = c.files[i]
 			reply.MapSeqNumber = i
-			reply.nMap = c.nMap
+			reply.NMap = c.nMap
 			reply.TaskType = MAP
+			reply.NReduce = c.nReduce
 			c.mapState[i].allocated = true
 			return true
 		}
@@ -152,7 +153,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	return c.nReduceDone == c.nMapDone
+	return c.nReduceDone == c.nReduce
 
 	// Your code here.
 

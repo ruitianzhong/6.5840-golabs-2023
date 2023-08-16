@@ -81,20 +81,20 @@ func handleMap(reply TaskReply, mapf func(string, string) []KeyValue) {
 	}
 	file.Close()
 	kva := mapf(filename, string(content))
-	reduce := make([][]KeyValue, reply.nReduce)
-	for i := 0; i < reply.nReduce; i++ {
+	reduce := make([][]KeyValue, reply.NReduce)
+	for i := 0; i < reply.NReduce; i++ {
 		reduce[i] = []KeyValue{}
 	}
 	for _, v := range kva {
-		rid := ihash(v.Key) % reply.nReduce
+		rid := ihash(v.Key) % reply.NReduce
 		reduce[rid] = append(reduce[rid], v)
 	}
-	for i := 0; i < reply.nReduce; i++ {
-		writeIntermediate(reply, reduce[i])
+	for i := 0; i < reply.NReduce; i++ {
+		writeIntermediate(reply, reduce[i], i)
 	}
 }
 
-func writeIntermediate(reply TaskReply, kva []KeyValue) {
+func writeIntermediate(reply TaskReply, kva []KeyValue, reduceSeqNum int) {
 	file, err := ioutil.TempFile("", "temp-map-*")
 	if err != nil {
 		log.Fatalf("cannot create temp file %v", err)
@@ -103,7 +103,7 @@ func writeIntermediate(reply TaskReply, kva []KeyValue) {
 	for _, v := range kva {
 		enc.Encode(&v)
 	}
-	newName := fmt.Sprintf("mr-%v-%v", reply.MapSeqNumber, reply.ReduceSeqNumber)
+	newName := fmt.Sprintf("mr-%v-%v", reply.MapSeqNumber, reduceSeqNum)
 	err = os.Rename(file.Name(), newName)
 	if err != nil {
 		log.Fatalf("%v rename fail \n", newName)
@@ -113,7 +113,7 @@ func writeIntermediate(reply TaskReply, kva []KeyValue) {
 
 func readIntermediate(reply TaskReply) []KeyValue {
 	kva := []KeyValue{}
-	for i := 0; i < reply.nMap; i++ {
+	for i := 0; i < reply.NMap; i++ {
 		filename := fmt.Sprintf("mr-%v-%v", i, reply.ReduceSeqNumber)
 		file, err := os.Open(filename)
 		if err != nil {
@@ -202,12 +202,12 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
+	// if err == nil {
+	// 	return true
+	// }
 
-	fmt.Println(err)
-	return false
+	// fmt.Println(err)
+	return err == nil
 }
 
 func CallGetTask(previousReply TaskReply, isInitial bool) (TaskReply, bool) {
@@ -216,7 +216,7 @@ func CallGetTask(previousReply TaskReply, isInitial bool) (TaskReply, bool) {
 	reply := TaskReply{}
 	if isInitial {
 		args.ArgsType = INIT
-		ok := call("Coordinator.GetTask", args, reply)
+		ok := call("Coordinator.GetTask", &args, &reply)
 		return reply, ok
 	}
 	args.ArgsType = DONE
@@ -227,6 +227,6 @@ func CallGetTask(previousReply TaskReply, isInitial bool) (TaskReply, bool) {
 	case REDUCE:
 		args.ReduceSeqNumber = previousReply.ReduceSeqNumber
 	}
-	ok := call("Coordinator.GetTask", args, reply)
+	ok := call("Coordinator.GetTask", &args, &reply)
 	return reply, ok
 }
