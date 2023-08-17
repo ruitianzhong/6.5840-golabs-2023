@@ -28,6 +28,13 @@ import (
 	"6.5840/labrpc"
 )
 
+type Role int
+
+const (
+	FOLLOWER Role = iota
+	LEADER
+	CANDIDATE
+)
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -57,11 +64,39 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-
+	role      Role
+	received  bool // whether received heartbeat during last timeout period
+	voted     []bool
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// persistent on all servers
+	currentTerm int
+	votedFor    int
+	log         []LogEntry
+
+	// volatile state on all servers
+	lastApplied int
+	commitIndex int
+
+	// TODO: volatile state on all leader
+	matchIndex []int
+	nextIndex  []int
+}
+
+type AppendEntriesArgs struct {
+	Term, LeaderID, PrevLogIndex, PrevLogTerm, LeaderCommit int // capital letter
+	Entries                                                 []LogEntry
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+type LogEntry struct {
+	Term, Index int
 }
 
 // return currentTerm and whether this server
@@ -92,10 +127,11 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.currentTerm = 0
+		rf.votedFor = -1
 		return
 	}
 	// Your code here (2C).
@@ -113,7 +149,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,22 +158,72 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term, CandidateID, LastLogIndex, LastLogTerm int // capital letter
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
+	VoteGranted bool // capital letter
+	Term        int
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.VoteGranted = false
+	if rf.currentTerm > args.Term {
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
+		lastLogTerm, lastLogIndex := rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Index
+		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex > lastLogIndex) {
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateID
+			// TODO: persist the data here
+		}
+	}
+
+	// State Trasfer
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+		if rf.role != FOLLOWER {
+			rf.Trasfer2Follower(reply.VoteGranted)
+		}
+	}
+
+	reply.Term = rf.currentTerm
+
+}
+
+func (rf *Raft) Trasfer2Follower(voteGranted bool) {
+	rf.role = FOLLOWER
+	rf.ResetVoted()
+	if !voteGranted {
+		rf.votedFor = -1
+	}
+}
+
+func (rf *Raft) Candidate2Follower() {
+	rf.role = FOLLOWER
+	rf.ResetVoted()
+	rf.votedFor = -1
+
+}
+
+func (rf *Raft) ResetVoted() {
+	for i := range rf.voted {
+		rf.voted[i] = false
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -173,7 +258,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -192,7 +276,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -217,11 +300,10 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -245,15 +327,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.role = FOLLOWER
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.matchIndex = make([]int, len(peers))
+	rf.nextIndex = make([]int, len(peers))
+	rf.log = make([]LogEntry, 1)
+	rf.log[0].Index = 0
+	rf.log[0].Term = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
