@@ -183,36 +183,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		return
-	}
-
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-		lastLogTerm, lastLogIndex := rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Index
-		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex > lastLogIndex) {
+	} else if rf.currentTerm == args.Term {
+		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.checkIfUpToDate(args) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 			// TODO: persist the data here
 		}
-	}
-
-	// State Trasfer
-	if rf.currentTerm < args.Term {
+	} else {
 		rf.currentTerm = args.Term
-		if rf.role != FOLLOWER {
-			rf.Trasfer2Follower(reply.VoteGranted)
+		rf.role = FOLLOWER
+		if rf.checkIfUpToDate(args) {
+			rf.votedFor = args.CandidateID
+			reply.VoteGranted = true
+		} else {
+			rf.votedFor = -1
 		}
 	}
-
 	reply.Term = rf.currentTerm
 
 }
 
-func (rf *Raft) Trasfer2Follower(voteGranted bool) {
-	rf.role = FOLLOWER
-	rf.ResetVoted()
-	rf.voteCount = 0
-	if !voteGranted {
-		rf.votedFor = -1
-	}
+func AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+}
+
+func (rf *Raft) checkIfUpToDate(args *RequestVoteArgs) bool {
+	lastLogTerm, lastLogIndex := rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Index
+	return args.LastLogTerm > lastLogTerm ||
+		(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
 }
 
 func (rf *Raft) ResetVoted() {
@@ -250,6 +248,11 @@ func (rf *Raft) ResetVoted() {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -305,33 +308,46 @@ func (rf *Raft) ticker() {
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
-
+		if rf.role == LEADER {
+			rf.mu.Unlock()
+			continue
+		}
 		if !rf.received {
+			// start the election
+			// TODO: persist the data
+			rf.PrepareElection()
+
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go handleSendRequestVote(rf, i, rf.currentTerm)
 				}
 			}
-
 		} else {
 			rf.received = false
 		}
 		rf.mu.Unlock()
 	}
 }
-
+func (rf *Raft) PrepareElection() {
+	rf.currentTerm += 1
+	rf.role = CANDIDATE
+	rf.voteCount = 1
+	rf.votedFor = rf.me
+	rf.ResetVoted()
+}
 func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
 	var reply RequestVoteReply
+	args := RequestVoteArgs{}
+	args.CandidateID = rf.me
+	args.Term = expectedTerm
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
 			rf.mu.Unlock()
 			return
 		}
-		args := RequestVoteArgs{}
-		args.CandidateID = rf.me
-		args.Term = expectedTerm
-		rf.mu.Unlock()
+		reply = RequestVoteReply{}
+		rf.mu.Unlock() // send RequestVote without lock
 		if rf.sendRequestVote(server, &args, &reply) {
 			break
 		}
@@ -354,6 +370,7 @@ func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
 
 func Transfer2Leader(rf *Raft) {
 	rf.role = LEADER
+	rf.received = false
 	// More to init
 
 }
