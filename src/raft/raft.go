@@ -67,6 +67,7 @@ type Raft struct {
 	role      Role
 	received  bool // whether received heartbeat during last timeout period
 	voted     []bool
+	voteCount int
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -208,16 +209,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) Trasfer2Follower(voteGranted bool) {
 	rf.role = FOLLOWER
 	rf.ResetVoted()
+	rf.voteCount = 0
 	if !voteGranted {
 		rf.votedFor = -1
 	}
-}
-
-func (rf *Raft) Candidate2Follower() {
-	rf.role = FOLLOWER
-	rf.ResetVoted()
-	rf.votedFor = -1
-
 }
 
 func (rf *Raft) ResetVoted() {
@@ -309,7 +304,58 @@ func (rf *Raft) ticker() {
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+
+		if !rf.received {
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					go handleSendRequestVote(rf, i, rf.currentTerm)
+				}
+			}
+
+		} else {
+			rf.received = false
+		}
+		rf.mu.Unlock()
 	}
+}
+
+func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
+	var reply RequestVoteReply
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
+			rf.mu.Unlock()
+			return
+		}
+		args := RequestVoteArgs{}
+		args.CandidateID = rf.me
+		args.Term = expectedTerm
+		rf.mu.Unlock()
+		if rf.sendRequestVote(server, &args, &reply) {
+			break
+		}
+	}
+	rf.mu.Lock()
+
+	if rf.role == CANDIDATE && rf.currentTerm == expectedTerm {
+		if reply.VoteGranted && !rf.voted[server] {
+			rf.voted[server] = true
+			rf.voteCount += 1
+			if rf.voteCount >= len(rf.peers)+1 && rf.role == LEADER {
+				Transfer2Leader(rf)
+			}
+		}
+	}
+
+	rf.mu.Unlock()
+
+}
+
+func Transfer2Leader(rf *Raft) {
+	rf.role = LEADER
+	// More to init
+
 }
 
 // the service or tester wants to create a Raft server. the ports
