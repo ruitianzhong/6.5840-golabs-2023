@@ -204,7 +204,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	reply.Term = rf.currentTerm
-
+	// if reply.VoteGranted {
+	// 	fmt.Printf("%v(term:%v ) Granted %v(term:%v) Vote\n", rf.me, rf.currentTerm, args.Term, args.CandidateID)
+	// }
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -219,6 +221,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 	}
 	reply.Success = true
+	rf.received = true
 	reply.Term = rf.currentTerm
 
 }
@@ -321,7 +324,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 200 + (rand.Int63() % 200)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.role == LEADER {
@@ -374,7 +377,7 @@ func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
 		if reply.VoteGranted && !rf.voted[server] {
 			rf.voted[server] = true
 			rf.voteCount += 1
-			if rf.voteCount >= len(rf.peers)+1 && rf.role == LEADER {
+			if rf.voteCount >= len(rf.peers)/2+1 {
 				rf.transfer2Leader()
 			}
 		}
@@ -389,38 +392,48 @@ func (rf *Raft) transfer2Leader() {
 	rf.received = false
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			go rf.handleSendAppendEntries(i, rf.currentTerm)
+			go rf.asyncSendAppendEntries(i, rf.currentTerm)
 		}
 	}
 }
 
-func (rf *Raft) handleSendAppendEntries(server int, expectedTerm int) {
+func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 
-	args := AppendEntriesArgs{}
-	var reply AppendEntriesReply
 	for !rf.killed() {
-
 		rf.mu.Lock()
 
 		if rf.role != LEADER || rf.currentTerm != expectedTerm {
 			rf.mu.Unlock()
 			return
 		}
-		rf.initAppendEntries(&args)
-		rf.mu.Unlock() // to send in parallel
-		rf.sendAppendEntries(server, &args, &reply)
 
-		rf.mu.Lock()
-		if rf.role != LEADER || rf.currentTerm != expectedTerm {
+		go func() {
+			args := AppendEntriesArgs{}
+			reply := AppendEntriesReply{}
+			rf.mu.Lock()
+
+			if rf.role != LEADER || rf.currentTerm != expectedTerm {
+				rf.mu.Unlock()
+				return
+			}
+			rf.initAppendEntries(&args)
+			rf.mu.Unlock() // to send in parallel
+			if !rf.sendAppendEntries(server, &args, &reply) {
+				return
+			}
+			rf.mu.Lock()
+			if rf.role != LEADER || rf.currentTerm != expectedTerm {
+				rf.mu.Unlock()
+				return
+			}
+			if !rf.handleAppendEntriesReply(reply) {
+				rf.mu.Unlock()
+				return
+			}
 			rf.mu.Unlock()
-			return
-		}
-		if !rf.handleAppendEntriesReply(reply) {
-			rf.mu.Unlock()
-			return
-		}
+		}()
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(1250) * time.Millisecond)
+		time.Sleep(time.Duration(110) * time.Millisecond)
 	}
 
 }
@@ -469,6 +482,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
+	rf.voted = make([]bool, len(peers))
 	rf.log = make([]LogEntry, 1)
 	rf.log[0].Index = 0
 	rf.log[0].Term = 0
