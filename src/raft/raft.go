@@ -203,7 +203,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 }
 
-func AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	} else if args.Term > rf.currentTerm {
+		rf.role = FOLLOWER
+		rf.currentTerm = args.Term
+	}
+	reply.Success = true
+	reply.Term = rf.currentTerm
 
 }
 
@@ -359,7 +371,7 @@ func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
 			rf.voted[server] = true
 			rf.voteCount += 1
 			if rf.voteCount >= len(rf.peers)+1 && rf.role == LEADER {
-				Transfer2Leader(rf)
+				rf.transfer2Leader()
 			}
 		}
 	}
@@ -368,11 +380,67 @@ func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
 
 }
 
-func Transfer2Leader(rf *Raft) {
+func (rf *Raft) transfer2Leader() {
 	rf.role = LEADER
 	rf.received = false
-	// More to init
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go rf.handleSendAppendEntries(i, rf.currentTerm)
+		}
+	}
+}
 
+func (rf *Raft) handleSendAppendEntries(server int, expectedTerm int) {
+
+	args := AppendEntriesArgs{}
+	var reply AppendEntriesReply
+	for !rf.killed() {
+
+		rf.mu.Lock()
+
+		if rf.role != LEADER || rf.currentTerm != expectedTerm {
+			rf.mu.Unlock()
+			return
+		}
+		rf.initAppendEntries(&args)
+		rf.mu.Unlock() // to send in parallel
+		rf.sendAppendEntries(server, &args, &reply)
+
+		rf.mu.Lock()
+		if rf.role != LEADER || rf.currentTerm != expectedTerm {
+			rf.mu.Unlock()
+			return
+		}
+		if !rf.handleAppendEntriesReply(reply) {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(1250) * time.Millisecond)
+	}
+
+}
+
+func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
+	if reply.Success {
+		return true
+	}
+	if reply.Term > rf.currentTerm {
+		rf.role = FOLLOWER
+		rf.currentTerm = reply.Term
+		return false
+	}
+	// TODO: Update some states of leader
+
+	return true
+}
+
+func (rf *Raft) initAppendEntries(args *AppendEntriesArgs) {
+	args.LeaderCommit = rf.commitIndex
+	args.LeaderID = rf.me
+	args.PrevLogIndex = rf.log[len(rf.log)-1].Index
+	args.PrevLogTerm = rf.log[len(rf.log)-1].Term
+	args.Term = rf.currentTerm
 }
 
 // the service or tester wants to create a Raft server. the ports
