@@ -338,7 +338,7 @@ func (rf *Raft) ticker() {
 
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
-					go handleSendRequestVote(rf, i, rf.currentTerm)
+					go rf.asyncSendRequestVote(i, rf.currentTerm)
 				}
 			}
 		} else {
@@ -354,36 +354,46 @@ func (rf *Raft) PrepareElection() {
 	rf.votedFor = rf.me
 	rf.ResetVoted()
 }
-func handleSendRequestVote(rf *Raft, server int, expectedTerm int) {
-	var reply RequestVoteReply
-	args := RequestVoteArgs{}
-	args.CandidateID = rf.me
-	args.Term = expectedTerm
+func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
+
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
 			rf.mu.Unlock()
 			return
 		}
-		reply = RequestVoteReply{}
-		rf.mu.Unlock() // send RequestVote without lock
-		if rf.sendRequestVote(server, &args, &reply) {
-			break
-		}
-	}
-	rf.mu.Lock()
-
-	if rf.role == CANDIDATE && rf.currentTerm == expectedTerm {
-		if reply.VoteGranted && !rf.voted[server] {
-			rf.voted[server] = true
-			rf.voteCount += 1
-			if rf.voteCount >= len(rf.peers)/2+1 {
-				rf.transfer2Leader()
+		go func() {
+			args := RequestVoteArgs{}
+			args.CandidateID = rf.me
+			args.Term = expectedTerm
+			rf.mu.Lock()
+			if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
+				rf.mu.Unlock()
+				return
 			}
-		}
-	}
+			reply := RequestVoteReply{}
+			rf.mu.Unlock() // send RequestVote without lock
+			if !rf.sendRequestVote(server, &args, &reply) {
+				return
+			}
 
-	rf.mu.Unlock()
+			rf.mu.Lock()
+
+			if rf.role == CANDIDATE && rf.currentTerm == expectedTerm {
+				if reply.VoteGranted && !rf.voted[server] {
+					rf.voted[server] = true
+					rf.voteCount += 1
+					if rf.voteCount >= len(rf.peers)/2+1 {
+						rf.transfer2Leader()
+					}
+				}
+			}
+
+			rf.mu.Unlock()
+		}()
+		rf.mu.Unlock()
+		time.Sleep(110 * time.Millisecond)
+	}
 
 }
 
