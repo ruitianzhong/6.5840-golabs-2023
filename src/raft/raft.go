@@ -88,7 +88,8 @@ type Raft struct {
 
 type AppendEntriesArgs struct {
 	Term, LeaderID, PrevLogIndex, PrevLogTerm, LeaderCommit int // capital letter
-	Entries                                                 []LogEntry
+	Entry                                                   LogEntry
+	ContainEntry                                            bool
 }
 
 type AppendEntriesReply struct {
@@ -220,12 +221,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
 	}
-	reply.Success = true
+	rf.appendLog(args, reply)
 	rf.received = true
 	reply.Term = rf.currentTerm
 
 }
 
+func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
+	lastIndex, lastTerm := rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
+	if prevIndex > lastIndex { // TODO: backoff optimization
+		reply.Success = false
+	} else if prevTerm > lastTerm {
+		rf.log = rf.log[:lastIndex]
+		reply.Success = false
+	} else {
+		if args.ContainEntry {
+			rf.log = append(rf.log, args.Entry)
+		}
+		rf.commitIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+		reply.Success = true
+	}
+}
+
+func min(x, y int) int {
+	if x > y {
+		return y
+	} else {
+		return x
+	}
+}
 func (rf *Raft) checkIfUpToDate(args *RequestVoteArgs) bool {
 	lastLogTerm, lastLogIndex := rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Index
 	return args.LastLogTerm > lastLogTerm ||
@@ -290,7 +315,16 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role == LEADER {
+		isLeader = true
+		term = rf.currentTerm
+		index = rf.log[len(rf.log)-1].Index + 1
+		log := LogEntry{Index: index, Term: term}
+		rf.log = append(rf.log, log)
+	}
 
 	// Your code here (2B).
 
@@ -399,6 +433,7 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 
 func (rf *Raft) transfer2Leader() {
 	rf.role = LEADER
+	rf.initNextIndex()
 	rf.received = false
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
@@ -426,7 +461,7 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 				rf.mu.Unlock()
 				return
 			}
-			rf.initAppendEntries(&args)
+			rf.initAppendEntries(server, &args)
 			rf.mu.Unlock() // to send in parallel
 			if !rf.sendAppendEntries(server, &args, &reply) {
 				return
@@ -436,7 +471,7 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 				rf.mu.Unlock()
 				return
 			}
-			if !rf.handleAppendEntriesReply(reply) {
+			if !rf.handleAppendEntriesReply(server, args, reply) {
 				rf.mu.Unlock()
 				return
 			}
@@ -448,8 +483,14 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 
 }
 
-func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
+func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
 	if reply.Success {
+		if args.ContainEntry {
+			rf.matchIndex[server] = args.PrevLogIndex + 1
+			if rf.nextIndex[server] < rf.log[len(rf.log)-1].Index {
+				rf.nextIndex[server] += 1
+			}
+		}
 		return true
 	}
 	if reply.Term > rf.currentTerm {
@@ -458,16 +499,26 @@ func (rf *Raft) handleAppendEntriesReply(reply AppendEntriesReply) bool {
 		return false
 	}
 	// TODO: Update some states of leader
+	rf.nextIndex[server] -= 1
 
 	return true
 }
 
-func (rf *Raft) initAppendEntries(args *AppendEntriesArgs) {
+func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) {
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderID = rf.me
-	args.PrevLogIndex = rf.log[len(rf.log)-1].Index
-	args.PrevLogTerm = rf.log[len(rf.log)-1].Term
-	args.Term = rf.currentTerm
+	args.PrevLogIndex = rf.log[rf.nextIndex[server]-1].Index
+	args.PrevLogTerm = rf.log[rf.nextIndex[server]-1].Term
+
+	next := rf.nextIndex[server]
+	if next <= rf.log[len(rf.log)-1].Index {
+		args.Entry = rf.log[next]
+		args.ContainEntry = true
+	} else {
+		args.Entry = LogEntry{Term: -1, Index: -1}
+		args.ContainEntry = false
+	}
+
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -498,9 +549,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log[0].Term = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.initNextIndex()
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
 	return rf
+}
+
+func (rf *Raft) initNextIndex() {
+	x := rf.log[len(rf.log)-1].Index + 1
+	for i := range rf.peers {
+		rf.nextIndex[i] = x
+	}
 }
