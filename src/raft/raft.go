@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +68,7 @@ type Raft struct {
 	role      Role
 	received  bool // whether received heartbeat during last timeout period
 	voted     []bool
+	applyCh   chan ApplyMsg
 	voteCount int
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -99,6 +101,7 @@ type AppendEntriesReply struct {
 
 type LogEntry struct {
 	Term, Index int
+	Command     interface{}
 }
 
 // return currentTerm and whether this server
@@ -205,9 +208,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 	reply.Term = rf.currentTerm
-	// if reply.VoteGranted {
-	// 	fmt.Printf("%v(term:%v ) Granted %v(term:%v) Vote\n", rf.me, rf.currentTerm, args.Term, args.CandidateID)
-	// }
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -230,17 +230,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
 	lastIndex, lastTerm := rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
-	if prevIndex > lastIndex { // TODO: backoff optimization
-		reply.Success = false
-	} else if prevTerm > lastTerm {
-		rf.log = rf.log[:lastIndex]
-		reply.Success = false
-	} else {
+	if prevTerm == lastTerm && prevIndex == lastIndex {
+		reply.Success = true
 		if args.ContainEntry {
 			rf.log = append(rf.log, args.Entry)
 		}
-		rf.commitIndex = min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
-		reply.Success = true
+		m := min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+		for rf.commitIndex < m {
+			rf.commitIndex += 1
+			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.log[rf.commitIndex].Command}
+		}
+	} else {
+		if lastIndex < prevIndex {
+			reply.Success = false
+		} else if lastIndex > prevIndex {
+			rf.log = rf.log[:prevIndex+1]
+			reply.Success = true
+		} else {
+			rf.log = rf.log[:lastIndex]
+			reply.Success = false
+		}
+
 	}
 }
 
@@ -322,12 +332,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = true
 		term = rf.currentTerm
 		index = rf.log[len(rf.log)-1].Index + 1
-		log := LogEntry{Index: index, Term: term}
+		log := LogEntry{Index: index, Term: term, Command: command}
 		rf.log = append(rf.log, log)
 	}
 
 	// Your code here (2B).
-
 	return index, term, isLeader
 }
 
@@ -400,6 +409,8 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 			args := RequestVoteArgs{}
 			args.CandidateID = rf.me
 			args.Term = expectedTerm
+			args.LastLogIndex = rf.log[len(rf.log)-1].Index // initially forget to init index & term
+			args.LastLogTerm = rf.log[len(rf.log)-1].Term
 			rf.mu.Lock()
 			if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
 				rf.mu.Unlock()
@@ -452,13 +463,16 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 		}
 
 		rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].Index
-		min := rf.matchIndex[0]
-		for i := range rf.peers {
-			if rf.matchIndex[i] < min {
-				min = rf.matchIndex[i]
-			}
+		quorum := len(rf.peers)/2 + 1
+		n := len(rf.peers)
+		sorted := make([]int, n)
+		copy(sorted, rf.matchIndex)
+		sort.Ints(sorted)
+		end := sorted[quorum-1] //prone to wrong here
+		for rf.commitIndex < end {
+			rf.commitIndex += 1
+			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.commitIndex].Command, CommandIndex: rf.commitIndex}
 		}
-		rf.commitIndex = min
 
 		rf.mu.Unlock()
 		time.Sleep(20 * time.Millisecond)
@@ -510,7 +524,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 	if reply.Success {
 		if args.ContainEntry {
 			rf.matchIndex[server] = args.PrevLogIndex + 1
-			if rf.nextIndex[server] < rf.log[len(rf.log)-1].Index {
+			if rf.nextIndex[server] <= rf.log[len(rf.log)-1].Index {
 				rf.nextIndex[server] += 1
 			}
 		}
@@ -530,6 +544,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) {
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderID = rf.me
+	args.Term = rf.currentTerm
 	args.PrevLogIndex = rf.log[rf.nextIndex[server]-1].Index
 	args.PrevLogTerm = rf.log[rf.nextIndex[server]-1].Term
 
@@ -570,6 +585,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = make([]LogEntry, 1)
 	rf.log[0].Index = 0
 	rf.log[0].Term = 0
+	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.initNextIndexAndMatchIndex()
