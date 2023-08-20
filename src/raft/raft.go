@@ -433,12 +433,35 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 
 func (rf *Raft) transfer2Leader() {
 	rf.role = LEADER
-	rf.initNextIndex()
+	rf.initNextIndexAndMatchIndex()
 	rf.received = false
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			go rf.asyncSendAppendEntries(i, rf.currentTerm)
 		}
+	}
+	go rf.updateMatchIndex(rf.currentTerm)
+}
+
+func (rf *Raft) updateMatchIndex(expectedTerm int) {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.role != LEADER || rf.currentTerm != expectedTerm {
+			rf.mu.Unlock()
+			return
+		}
+
+		rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].Index
+		min := rf.matchIndex[0]
+		for i := range rf.peers {
+			if rf.matchIndex[i] < min {
+				min = rf.matchIndex[i]
+			}
+		}
+		rf.commitIndex = min
+
+		rf.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -549,16 +572,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log[0].Term = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.initNextIndex()
+	rf.initNextIndexAndMatchIndex()
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
 	return rf
 }
 
-func (rf *Raft) initNextIndex() {
+func (rf *Raft) initNextIndexAndMatchIndex() {
 	x := rf.log[len(rf.log)-1].Index + 1
 	for i := range rf.peers {
 		rf.nextIndex[i] = x
+		rf.matchIndex[i] = 0
 	}
 }
