@@ -95,8 +95,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term                int
+	Success             bool
+	XTerm, XIndex, XLen int
 }
 
 type LogEntry struct {
@@ -246,21 +247,27 @@ func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 			reply.Success = false
 		} else if lastIndex > prevIndex {
 			rf.log = rf.log[:prevIndex+1]
-			if rf.log[len(rf.log)-1].Term == rf.currentTerm {
+			if rf.log[len(rf.log)-1].Term == prevTerm { // error here
 				reply.Success = true
 			} else {
-				reply.Success = false
-				rf.log = rf.log[:len(rf.log)-1]
+				rf.hintBackoff(reply)
 			}
 
 		} else {
-			rf.log = rf.log[:lastIndex]
-			reply.Success = false
+			rf.hintBackoff(reply)
 		}
 
 	}
 }
 
+func (rf *Raft) hintBackoff(reply *AppendEntriesReply) {
+	lastIndex := rf.log[len(rf.log)-1].Index
+	reply.XIndex = rf.log[lastIndex].Index
+	reply.XTerm = rf.log[lastIndex].Term
+	rf.log = rf.log[:lastIndex]
+	reply.XLen = len(rf.log)
+	reply.Success = false
+}
 func min(x, y int) int {
 	if x > y {
 		return y
@@ -527,7 +534,7 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 			rf.mu.Unlock()
 		}()
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(110) * time.Millisecond)
+		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 
 }
@@ -548,11 +555,31 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 		return false
 	}
 	// TODO: Update some states of leader
-	rf.nextIndex[server] -= 1
+	rf.backoff(server, reply)
 	RaftDebug(rAppendReject, "Server %v Leader received from %v next:%v match:%v",
 		rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 
 	return true
+}
+
+func (rf *Raft) backoff(server int, reply AppendEntriesReply) {
+
+	if rf.log[len(rf.log)-1].Index-reply.XLen >= 10 {
+		rf.nextIndex[server] = reply.XLen + 1
+		return
+	}
+
+	conflictTerm := reply.XTerm
+	next := rf.nextIndex[server]
+
+	for rf.log[next-1].Term > conflictTerm {
+		next -= 1
+	}
+	if rf.log[next-1].Term != conflictTerm {
+		rf.nextIndex[server] = reply.XIndex
+	} else {
+		rf.nextIndex[server] = next
+	}
 }
 
 func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) {
