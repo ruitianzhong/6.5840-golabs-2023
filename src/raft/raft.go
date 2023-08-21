@@ -90,7 +90,7 @@ type Raft struct {
 
 type AppendEntriesArgs struct {
 	Term, LeaderID, PrevLogIndex, PrevLogTerm, LeaderCommit int // capital letter
-	Entry                                                   LogEntry
+	Entry                                                   []LogEntry
 	ContainEntry                                            bool
 }
 
@@ -233,11 +233,12 @@ func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	if prevTerm == lastTerm && prevIndex == lastIndex {
 		reply.Success = true
 		if args.ContainEntry {
-			rf.log = append(rf.log, args.Entry)
+			rf.log = append(rf.log, args.Entry...)
 		}
 		m := min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
 		for rf.commitIndex < m {
 			rf.commitIndex += 1
+			RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
 			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.log[rf.commitIndex].Command}
 		}
 	} else {
@@ -245,7 +246,13 @@ func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 			reply.Success = false
 		} else if lastIndex > prevIndex {
 			rf.log = rf.log[:prevIndex+1]
-			reply.Success = true
+			if rf.log[len(rf.log)-1].Term == rf.currentTerm {
+				reply.Success = true
+			} else {
+				reply.Success = false
+				rf.log = rf.log[:len(rf.log)-1]
+			}
+
 		} else {
 			rf.log = rf.log[:lastIndex]
 			reply.Success = false
@@ -469,9 +476,12 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 		copy(sorted, rf.matchIndex)
 		sort.Ints(sorted)
 		end := sorted[quorum-1] //prone to wrong here
-		for rf.commitIndex < end {
-			rf.commitIndex += 1
-			rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.commitIndex].Command, CommandIndex: rf.commitIndex}
+		if rf.log[end].Term == rf.currentTerm {
+			for rf.commitIndex < end {
+				rf.commitIndex += 1
+				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
+				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.commitIndex].Command, CommandIndex: rf.commitIndex}
+			}
 		}
 
 		rf.mu.Unlock()
@@ -508,6 +518,8 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 				rf.mu.Unlock()
 				return
 			}
+			RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v to %v",
+				rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, server)
 			if !rf.handleAppendEntriesReply(server, args, reply) {
 				rf.mu.Unlock()
 				return
@@ -523,10 +535,10 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
 	if reply.Success {
 		if args.ContainEntry {
-			rf.matchIndex[server] = args.PrevLogIndex + 1
-			if rf.nextIndex[server] <= rf.log[len(rf.log)-1].Index {
-				rf.nextIndex[server] += 1
-			}
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entry)
+			rf.nextIndex[server] += len(args.Entry)
+			RaftDebug(rAppendAccept, "Server %v Leader received from %v next:%v match:%v",
+				rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 		}
 		return true
 	}
@@ -537,6 +549,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 	}
 	// TODO: Update some states of leader
 	rf.nextIndex[server] -= 1
+	RaftDebug(rAppendReject, "Server %v Leader received from %v next:%v match:%v",
+		rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
 
 	return true
 }
@@ -547,14 +561,12 @@ func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) {
 	args.Term = rf.currentTerm
 	args.PrevLogIndex = rf.log[rf.nextIndex[server]-1].Index
 	args.PrevLogTerm = rf.log[rf.nextIndex[server]-1].Term
-
+	args.ContainEntry = false
 	next := rf.nextIndex[server]
 	if next <= rf.log[len(rf.log)-1].Index {
-		args.Entry = rf.log[next]
+		args.Entry = make([]LogEntry, rf.log[len(rf.log)-1].Index-next+1)
+		copy(args.Entry, rf.log[next:])
 		args.ContainEntry = true
-	} else {
-		args.Entry = LogEntry{Term: -1, Index: -1}
-		args.ContainEntry = false
 	}
 
 }
@@ -575,7 +587,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.role = FOLLOWER
-
+	InitLog()
 	// Your initialization code here (2A, 2B, 2C).
 	rf.commitIndex = 0
 	rf.lastApplied = 0
