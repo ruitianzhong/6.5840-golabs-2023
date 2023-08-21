@@ -17,6 +17,7 @@ const (
 	rAppendReject LogTopic = "Append Rejected "
 	rAppendSend   LogTopic = "Append Send "
 	rCommit       LogTopic = "Commit "
+	rLeader       LogTopic = "Become Leader "
 )
 
 var start time.Time
