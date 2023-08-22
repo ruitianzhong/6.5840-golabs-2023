@@ -83,9 +83,13 @@ type Raft struct {
 	lastApplied int
 	commitIndex int
 
-	// TODO: volatile state on all leader
+	// volatile state on all leader
 	matchIndex []int
 	nextIndex  []int
+
+	// snapshot state,persistent on all servers
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 type AppendEntriesArgs struct {
@@ -103,6 +107,15 @@ type AppendEntriesReply struct {
 type LogEntry struct {
 	Term, Index int
 	Command     interface{}
+}
+
+type InstallSnapshotArgs struct {
+	Term, LeaderID, LastIncludedIndex, LastIncludedTerm int
+	Data                                                []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int // for leader to update itself
 }
 
 // return currentTerm and whether this server
@@ -260,6 +273,39 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 }
 
+func (rf *Raft) InstallSnapshotArgs(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+}
+
+func (rf *Raft) getPrevLogIndexAndTerm() (prevIndex, prevTerm int) {
+	if len(rf.log) > 0 {
+		prevIndex, prevTerm = rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
+	} else {
+		prevIndex, prevTerm = rf.lastIncludedIndex, rf.lastIncludedTerm
+	}
+	return prevIndex, prevTerm
+}
+
+func (rf *Raft) translateIndex(index int) int {
+
+	return index - (rf.lastIncludedIndex + 1)
+
+}
+
+func (rf *Raft) getPrevLogIndex() int {
+	index, _ := rf.getPrevLogIndexAndTerm()
+	return index
+}
+
+func (rf *Raft) getLastLogTerm() int {
+	_, term := rf.getPrevLogIndexAndTerm()
+	return term
+}
+
+func (rf *Raft) unsafeGetLogEntry(index int) LogEntry {
+	return rf.log[rf.translateIndex(index)]
+}
+
 func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
 	lastIndex, lastTerm := rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
@@ -268,33 +314,61 @@ func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 		if args.ContainEntry {
 			rf.log = append(rf.log, args.Entry...)
 		}
-		m := min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
-		for rf.commitIndex < m {
-			rf.commitIndex += 1
-			RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
-			rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.log[rf.commitIndex].Command}
-		}
+		rf.updateFollowerCommitIndex(args)
 	} else {
-		if lastIndex < prevIndex {
-			reply.Success = false
-			reply.Term = rf.log[lastIndex].Term
-			reply.XIndex = lastIndex
-		} else if lastIndex > prevIndex {
-			// buggy code here before,no bugs for now
-			rf.log = rf.log[:prevIndex+1]
-			if rf.log[len(rf.log)-1].Term == prevTerm { // error here
-				reply.Success = true
-				if args.ContainEntry {
-					rf.log = append(rf.log, args.Entry...)
+		rf.handleConflict(args, reply)
+	}
+
+}
+
+func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
+	if args.LeaderCommit <= rf.commitIndex {
+		return
+	}
+	m := min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+	for rf.commitIndex < m {
+		rf.commitIndex += 1
+		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
+		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.log[rf.commitIndex].Command}
+	}
+}
+
+func (rf *Raft) handleConflict(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
+	lastIndex := rf.log[len(rf.log)-1].Index
+	if lastIndex < prevIndex {
+		reply.Success = false
+		reply.Term = rf.log[lastIndex].Term
+		reply.XIndex = lastIndex
+		reply.XLen = len(rf.log)
+	} else if lastIndex > prevIndex {
+
+		if rf.log[prevIndex].Term == prevTerm {
+			i := 0
+			ok := true
+			for i < len(args.Entry) && i+prevIndex+1 <= lastIndex {
+				if args.Entry[i].Term != rf.log[i+prevIndex+1].Term {
+					ok = false
+					break
 				}
-			} else {
+				i += 1
+			}
+			if !ok {
+				rf.log = rf.log[:i+prevIndex+1]
 				rf.hintBackoff(reply)
+
+			} else if i+prevIndex+1 > lastIndex && i < len(args.Entry) {
+				rf.log = append(rf.log, args.Entry[i:]...)
+				rf.updateFollowerCommitIndex(args)
+				reply.Success = true
 			}
 
 		} else {
+			rf.log = rf.log[:prevIndex] // easy to be wrong
 			rf.hintBackoff(reply)
 		}
-
+	} else {
+		rf.hintBackoff(reply)
 	}
 }
 
