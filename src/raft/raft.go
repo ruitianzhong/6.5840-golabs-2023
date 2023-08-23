@@ -297,7 +297,7 @@ func (rf *Raft) getPrevLogIndex() int {
 	return index
 }
 
-func (rf *Raft) getLastLogTerm() int {
+func (rf *Raft) getPrevLogTerm() int {
 	_, term := rf.getPrevLogIndexAndTerm()
 	return term
 }
@@ -308,7 +308,7 @@ func (rf *Raft) unsafeGetLogEntry(index int) LogEntry {
 
 func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
-	lastIndex, lastTerm := rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term
+	lastIndex, lastTerm := rf.getPrevLogIndexAndTerm()
 	if prevTerm == lastTerm && prevIndex == lastIndex {
 		reply.Success = true
 		if args.ContainEntry {
@@ -325,59 +325,59 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 	if args.LeaderCommit <= rf.commitIndex {
 		return
 	}
-	m := min(args.LeaderCommit, rf.log[len(rf.log)-1].Index)
+	m := min(args.LeaderCommit, rf.getPrevLogIndex())
 	for rf.commitIndex < m {
 		rf.commitIndex += 1
-		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
-		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.log[rf.commitIndex].Command}
+		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.unsafeGetLogEntry(rf.commitIndex).Command, rf.commitIndex)
+		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.unsafeGetLogEntry(rf.commitIndex).Command}
 	}
 }
 
 func (rf *Raft) handleConflict(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
-	lastIndex := rf.log[len(rf.log)-1].Index
+	lastIndex := rf.getPrevLogIndex()
 	if lastIndex < prevIndex {
 		reply.Success = false
-		reply.Term = rf.log[lastIndex].Term
+		reply.Term = rf.getPrevLogTerm()
 		reply.XIndex = lastIndex
 		reply.XLen = len(rf.log)
 	} else if lastIndex > prevIndex {
 
-		if rf.log[prevIndex].Term == prevTerm {
+		if rf.unsafeGetLogEntry(prevIndex).Term == prevTerm {
 			i := 0
 			ok := true
 			for i < len(args.Entry) && i+prevIndex+1 <= lastIndex {
-				if args.Entry[i].Term != rf.log[i+prevIndex+1].Term {
+				if args.Entry[i].Term != rf.unsafeGetLogEntry(i+prevIndex+1).Term {
 					ok = false
+					RaftDebug(rAppendReject, "Server %v Client finds conflict index:%v/%v args.Entry[i].Term:%v %v ", rf.me, i, i+prevIndex+1, args.Entry[i].Term)
 					break
 				}
 				i += 1
 			}
 			if !ok {
-				rf.log = rf.log[:i+prevIndex+1]
-				rf.hintBackoff(reply)
+				rf.hintBackoff(reply, i+prevIndex+1)
 
 			} else if i+prevIndex+1 > lastIndex && i < len(args.Entry) {
 				rf.log = append(rf.log, args.Entry[i:]...)
 				rf.updateFollowerCommitIndex(args)
 				reply.Success = true
+			} else {
+				reply.Success = true // forget to reply hearbeat AppendEntriesRpc
 			}
 
 		} else {
-			rf.log = rf.log[:prevIndex] // easy to be wrong
-			rf.hintBackoff(reply)
+			rf.hintBackoff(reply, prevIndex)
 		}
 	} else {
-		rf.hintBackoff(reply)
+		rf.hintBackoff(reply, prevIndex)
 	}
 }
 
-func (rf *Raft) hintBackoff(reply *AppendEntriesReply) {
-	lastIndex := rf.log[len(rf.log)-1].Index
-	reply.XIndex = rf.log[lastIndex].Index
-	reply.XTerm = rf.log[lastIndex].Term
-	rf.log = rf.log[:lastIndex]
-	reply.XLen = len(rf.log)
+func (rf *Raft) hintBackoff(reply *AppendEntriesReply, confilctIndex int) {
+	rf.log = rf.log[:confilctIndex]
+	e := rf.unsafeGetLogEntry(confilctIndex - 1)
+	reply.XIndex, reply.XTerm = e.Index, e.Term
+	reply.XLen = rf.getPrevLogIndex()
 	reply.Success = false
 }
 func min(x, y int) int {
@@ -645,8 +645,8 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 				rf.mu.Unlock()
 				return
 			}
-			RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v to %v",
-				rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, server)
+			RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v entries length: %vto %v",
+				rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entry), server)
 			if !rf.handleAppendEntriesReply(server, args, reply) {
 				rf.mu.Unlock()
 				return
@@ -684,9 +684,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 	}
 	// TODO: Update some states of leader
 	rf.backoff(server, reply)
-	RaftDebug(rAppendReject, "Server %v Leader received from %v next:%v match:%v",
-		rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
-
+	RaftDebug(rAppendReject, "Server %v Leader received from %v next:%v match:%v XIndex:%v XTerm:%v",
+		rf.me, server, rf.nextIndex[server], rf.matchIndex[server], reply.XIndex, reply.XTerm)
 	return true
 }
 
@@ -698,7 +697,7 @@ func (rf *Raft) backoff(server int, reply AppendEntriesReply) {
 	for rf.log[next-1].Term > conflictTerm {
 		next -= 1
 	}
-	if rf.log[next-1].Term != conflictTerm || reply.XIndex+1 < next {
+	if rf.log[next-1].Term != conflictTerm {
 		rf.nextIndex[server] = reply.XIndex + 1
 	} else {
 		rf.nextIndex[server] = next
