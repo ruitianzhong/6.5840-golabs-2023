@@ -154,7 +154,6 @@ func (rf *Raft) raftState2Bytes() []byte {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
-	e.Encode(rf.votedFor)
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
@@ -176,6 +175,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.votedFor = -1
 		rf.lastIncludedIndex = -1
 		rf.lastIncludedTerm = -1
+		rf.log = make([]LogEntry, 1)
 		rf.log[0].Index = 0
 		rf.log[0].Term = 0
 		return
@@ -744,7 +744,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
 	rf.voted = make([]bool, len(peers))
-	rf.log = make([]LogEntry, 1)
 	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
