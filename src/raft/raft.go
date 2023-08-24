@@ -333,6 +333,16 @@ func (rf *Raft) unsafeGetLogEntry(index int) LogEntry {
 func (rf *Raft) appendLog(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	prevTerm, prevIndex := args.PrevLogTerm, args.PrevLogIndex
 	lastIndex, lastTerm := rf.getPrevLogIndexAndTerm()
+
+	if prevIndex < rf.lastIncludedIndex {
+		if len(args.Entry)+prevIndex <= rf.lastIncludedIndex {
+			reply.Success = true
+			return
+		}
+		args.PrevLogIndex = rf.lastIncludedIndex
+		args.PrevLogTerm = rf.lastIncludedTerm
+		args.Entry = args.Entry[rf.lastIncludedIndex-prevIndex:]
+	}
 	if prevTerm == lastTerm && prevIndex == lastIndex {
 		reply.Success = true
 		if args.ContainEntry {
@@ -398,7 +408,7 @@ func (rf *Raft) handleConflict(args *AppendEntriesArgs, reply *AppendEntriesRepl
 }
 
 func (rf *Raft) hintBackoff(reply *AppendEntriesReply, confilctIndex int) {
-	rf.log = rf.log[:confilctIndex]
+	rf.log = rf.log[:rf.translateIndex(confilctIndex)]
 	e := rf.unsafeGetLogEntry(confilctIndex - 1)
 	reply.XIndex, reply.XTerm = e.Index, e.Term
 	reply.XLen = rf.getPrevLogIndex()
@@ -412,7 +422,7 @@ func min(x, y int) int {
 	}
 }
 func (rf *Raft) checkIfUpToDate(args *RequestVoteArgs) bool {
-	lastLogTerm, lastLogIndex := rf.log[len(rf.log)-1].Term, rf.log[len(rf.log)-1].Index
+	lastLogIndex, lastLogTerm := rf.getPrevLogIndexAndTerm()
 	return args.LastLogTerm > lastLogTerm ||
 		(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
 }
@@ -486,7 +496,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.role == LEADER {
 		isLeader = true
 		term = rf.currentTerm
-		index = rf.log[len(rf.log)-1].Index + 1
+		index = rf.getPrevLogIndex() + 1
 		log := LogEntry{Index: index, Term: term, Command: command}
 		rf.log = append(rf.log, log)
 		rf.persist()
@@ -565,8 +575,7 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 			args := RequestVoteArgs{}
 			args.CandidateID = rf.me
 			args.Term = expectedTerm
-			args.LastLogIndex = rf.log[len(rf.log)-1].Index // initially forget to init index & term
-			args.LastLogTerm = rf.log[len(rf.log)-1].Term
+			args.LastLogIndex, args.LastLogTerm = rf.getPrevLogIndexAndTerm() // initially forget to init index & term
 			rf.mu.Lock()
 			if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
 				rf.mu.Unlock()
@@ -600,7 +609,7 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 
 func (rf *Raft) transfer2Leader() {
 	RaftDebug(rLeader, "Server %v term:%v lastIndex:%v lastTerm:%v",
-		rf.me, rf.currentTerm, rf.log[len(rf.log)-1].Index, rf.log[len(rf.log)-1].Term)
+		rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm())
 	rf.role = LEADER
 	rf.initNextIndexAndMatchIndex()
 	rf.received = false
@@ -620,18 +629,18 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 			return
 		}
 
-		rf.matchIndex[rf.me] = rf.log[len(rf.log)-1].Index
+		rf.matchIndex[rf.me] = rf.getPrevLogIndex()
 		quorum := len(rf.peers)/2 + 1
 		n := len(rf.peers)
 		sorted := make([]int, n)
 		copy(sorted, rf.matchIndex)
 		sort.Ints(sorted)
 		end := sorted[quorum-1] //prone to wrong here
-		if rf.log[end].Term == rf.currentTerm {
+		if rf.log[rf.translateIndex(end)].Term == rf.currentTerm {
 			for rf.commitIndex < end {
 				rf.commitIndex += 1
-				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.commitIndex].Command, rf.commitIndex)
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.commitIndex].Command, CommandIndex: rf.commitIndex}
+				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.translateIndex(rf.commitIndex)].Command, rf.commitIndex)
+				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.translateIndex(rf.commitIndex)].Command, CommandIndex: rf.commitIndex}
 			}
 		}
 
@@ -659,7 +668,9 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 				rf.mu.Unlock()
 				return
 			}
-			rf.initAppendEntries(server, &args)
+			if !rf.initAppendEntries(server, &args) {
+				go rf.asyncSendInstallSnapshot(server)
+			}
 			rf.mu.Unlock() // to send in parallel
 			if !rf.sendAppendEntries(server, &args, &reply) {
 				return
@@ -752,30 +763,38 @@ func (rf *Raft) backoff(server int, reply AppendEntriesReply) {
 	conflictTerm := reply.XTerm
 	next := rf.nextIndex[server]
 
-	for rf.log[next-1].Term > conflictTerm {
+	for rf.translateIndex(next-1) >= 0 && rf.unsafeGetLogEntry(next-1).Term > conflictTerm {
 		next -= 1
 	}
-	if rf.log[next-1].Term != conflictTerm {
+	if rf.translateIndex(next-1) < 0 || rf.log[rf.translateIndex(next-1)].Term != conflictTerm {
 		rf.nextIndex[server] = reply.XIndex + 1
 	} else {
 		rf.nextIndex[server] = next
 	}
 }
 
-func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) {
+func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) bool {
+
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderID = rf.me
 	args.Term = rf.currentTerm
-	args.PrevLogIndex = rf.log[rf.nextIndex[server]-1].Index
-	args.PrevLogTerm = rf.log[rf.nextIndex[server]-1].Term
-	args.ContainEntry = false
-	next := rf.nextIndex[server]
-	if next <= rf.log[len(rf.log)-1].Index {
-		args.Entry = make([]LogEntry, rf.log[len(rf.log)-1].Index-next+1)
-		copy(args.Entry, rf.log[next:])
-		args.ContainEntry = true
+	if rf.translateIndex(rf.nextIndex[server]) < 0 {
+		args.ContainEntry = false
+		args.PrevLogIndex, args.PrevLogTerm = rf.lastIncludedIndex, rf.lastIncludedTerm
+		return false
+	} else {
+		e := rf.unsafeGetLogEntry(rf.nextIndex[server] - 1)
+		args.PrevLogIndex = e.Index
+		args.PrevLogTerm = e.Term
+		args.ContainEntry = false
+		next := rf.nextIndex[server]
+		if next <= rf.getPrevLogIndex() {
+			args.Entry = make([]LogEntry, rf.getPrevLogIndex()-next+1)
+			copy(args.Entry, rf.log[rf.translateIndex(next):])
+			args.ContainEntry = true
+		}
+		return true
 	}
-
 }
 
 // the service or tester wants to create a Raft server. the ports
