@@ -208,7 +208,12 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
-
+	if index > rf.lastIncludedIndex {
+		rf.lastIncludedTerm = rf.log[rf.lastIncludedIndex-index-1].Term
+		rf.log = rf.log[rf.lastIncludedIndex-index:]
+		rf.lastIncludedIndex = index
+		rf.persistSnapshot(snapshot)
+	}
 	defer rf.mu.Unlock()
 
 }
@@ -273,7 +278,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 }
 
-func (rf *Raft) InstallSnapshotArgs(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.role = FOLLOWER
+		rf.persist()
+	}
+	reply.Term = rf.currentTerm
+	if args.LastIncludedIndex > rf.lastIncludedIndex {
+		snapshot := args.Data
+		rf.log = rf.log[args.LastIncludedIndex-rf.lastIncludedIndex:]
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.lastIncludedTerm = args.LastIncludedTerm
+		rf.commitIndex = rf.lastIncludedIndex
+		rf.persistSnapshot(snapshot)
+		applyMsg := ApplyMsg{SnapshotValid: true, SnapshotTerm: rf.lastIncludedTerm, SnapshotIndex: rf.lastIncludedIndex, Snapshot: snapshot}
+		rf.applyCh <- applyMsg
+	}
 
 }
 
@@ -664,6 +688,40 @@ func max(x, y int) int {
 	} else {
 		return y
 	}
+}
+
+func (rf *Raft) asyncSendInstallSnapshot(server int) {
+
+	rf.mu.Lock()
+	args := InstallSnapshotArgs{}
+	reply := InstallSnapshotReply{}
+	rf.initInstallSanpshotArgs(&args)
+	rf.mu.Unlock()
+	ok := rf.sendInstallSnapshot(server, &args, &reply)
+	if ok {
+		rf.mu.Lock()
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.role = FOLLOWER
+			rf.persist()
+			rf.mu.Unlock()
+			return
+		}
+		if rf.role == LEADER {
+			rf.matchIndex[server] = max(args.LastIncludedIndex, rf.matchIndex[server])
+			rf.nextIndex[server] = max(rf.nextIndex[server], args.LastIncludedIndex+1)
+		}
+		rf.mu.Unlock()
+	}
+
+}
+
+func (rf *Raft) initInstallSanpshotArgs(args *InstallSnapshotArgs) {
+	args.LastIncludedIndex = rf.lastIncludedIndex
+	args.LastIncludedTerm = rf.lastIncludedTerm
+	args.Data = rf.persister.ReadSnapshot()
+	args.LeaderID = rf.me
+	args.Term = rf.currentTerm
 }
 
 func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, reply AppendEntriesReply) bool {
