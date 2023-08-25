@@ -12,12 +12,16 @@ type LogRole string
 type LogTopic string
 
 const (
-	rError        LogTopic = "ERROR "
-	rAppendAccept LogTopic = "Append Accepted "
-	rAppendReject LogTopic = "Append Rejected "
-	rAppendSend   LogTopic = "Append Send "
-	rCommit       LogTopic = "Commit "
-	rLeader       LogTopic = "Become Leader "
+	rError             LogTopic = "[ERROR] "
+	rAppendAccept      LogTopic = "[Append Accepted] "
+	rAppendReject      LogTopic = "[Append Rejected] "
+	rAppendSend        LogTopic = "[Append Send] "
+	rCommit            LogTopic = "[Commit] "
+	rLeader            LogTopic = "[Become Leader] "
+	rSnapshotCreate    LogTopic = "[Create Snapshot] "
+	rSnapshotInstalled LogTopic = "[Install Snapshot]"
+	rSnapshotStart     LogTopic = "[Start Snapshot] "
+	rSnapshotAccept    LogTopic = "[Accept Snapshot] "
 )
 
 var start time.Time
