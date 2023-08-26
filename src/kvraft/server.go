@@ -18,11 +18,22 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type OpType string
+
+const (
+	APPEND OpType = "APPEND"
+	Set    OpType = "SET"
+	GET    OpType = "GET"
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId, OpSeq int
+	OpType          OpType
+	PutAppend       PutAppendArgs
+	Get             GetArgs
 }
 
 type KVServer struct {
@@ -35,10 +46,20 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvMap        map[string]string
+	dup          map[int64]CachedReply
 }
 
+type CachedReply struct {
+	GetReply       GetReply
+	PutAppendReply PutAppendReply
+	Type           OpType
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+
+	kv.mu.Lock()
+	
 	// Your code here.
 }
 
@@ -87,7 +108,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.kvMap = make(map[string]string)
+	kv.dup = make(map[int64]CachedReply)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 

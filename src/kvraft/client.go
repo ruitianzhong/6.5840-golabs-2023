@@ -4,9 +4,10 @@ import "6.5840/labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
-	servers []*labrpc.ClientEnd
+	servers      []*labrpc.ClientEnd
+	clientId     int64
+	cachedLeader int
 	// You will have to modify this struct.
 }
 
@@ -20,6 +21,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clientId = nrand()
+	ck.cachedLeader = -1
 	// You'll have to add code here.
 	return ck
 }
