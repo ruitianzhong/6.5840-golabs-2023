@@ -1,12 +1,14 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
 const Debug = false
@@ -21,19 +23,19 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type OpType string
 
 const (
-	APPEND OpType = "APPEND"
-	Set    OpType = "SET"
-	GET    OpType = "GET"
+	PutAppend OpType = "PutAppend"
+	GET       OpType = "Get"
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	ClientId, OpSeq int
-	OpType          OpType
-	PutAppend       PutAppendArgs
-	Get             GetArgs
+	OpType    OpType
+	PutAppend PutAppendArgs
+	Get       GetArgs
+	ClientId  int64
+	SeqNum    int
 }
 
 type KVServer struct {
@@ -46,25 +48,87 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap        map[string]string
-	dup          map[int64]CachedReply
+	kvMap map[string]string
+	dup   map[int64]CachedReply
 }
 
 type CachedReply struct {
 	GetReply       GetReply
 	PutAppendReply PutAppendReply
 	Type           OpType
+	SeqNum         int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
-	kv.mu.Lock()
-	
+	op := Op{OpType: GET, Get: *args, ClientId: args.ClientId, SeqNum: args.SeqNum}
+	_, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+
+	for !kv.killed() {
+		kv.mu.Lock()
+		currentTerm, _ := kv.rf.GetState()
+		if currentTerm != term {
+			kv.mu.Unlock()
+			reply.Err = ErrWrongLeader
+			return
+		}
+
+		k, ok := kv.dup[args.ClientId]
+		if ok {
+			if k.SeqNum == op.SeqNum {
+				reply.Err = k.GetReply.Err
+				reply.Value = k.GetReply.Value
+				kv.mu.Unlock()
+				return
+			} else if k.SeqNum > op.SeqNum {
+				reply.Err = ErrWrongLeader
+				kv.mu.Unlock()
+				return
+			}
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// Your code here.
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	kv.mu.Lock()
+	op := Op{OpType: PutAppend, PutAppend: *args, ClientId: args.ClientId, SeqNum: args.SeqNum}
+	_, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	for kv.killed() {
+		kv.mu.Lock()
+		currentTerm, _ := kv.rf.GetState()
+		if currentTerm != term {
+			kv.mu.Unlock()
+			reply.Err = ErrWrongLeader
+		}
+		k, ok := kv.dup[op.ClientId]
+		if ok {
+			if k.SeqNum == op.SeqNum {
+				reply.Err = k.GetReply.Err
+				kv.mu.Unlock()
+				return
+			} else if k.SeqNum > op.SeqNum {
+				reply.Err = ErrWrongLeader
+				kv.mu.Unlock()
+				return
+			}
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -114,6 +178,53 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.rxMsg()
 
 	return kv
+}
+
+func (kv *KVServer) rxMsg() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		command, ok := msg.Command.(Op)
+		if !ok {
+			panic("Unexpected type")
+		}
+
+		kv.mu.Lock()
+		id, seq := command.ClientId, command.SeqNum
+		v, ok := kv.dup[id]
+		if !ok || v.SeqNum < seq {
+			reply := new(CachedReply)
+			kv.applyCommand(reply, command)
+		}
+
+		kv.mu.Unlock()
+	}
+
+}
+
+func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
+
+	reply.Type = op.OpType
+
+	if op.OpType == PutAppend {
+
+		v, ok := kv.kvMap[op.PutAppend.Key]
+		if ok {
+			v += op.PutAppend.Value
+		}
+		kv.kvMap[op.PutAppend.Key] = v
+		reply.PutAppendReply.Err = OK
+
+	} else if op.OpType == GET {
+		v, ok := kv.kvMap[op.Get.Key]
+		if ok {
+			reply.GetReply.Value = v
+			reply.GetReply.Err = OK
+		} else {
+			reply.GetReply.Err = ErrNoKey
+		}
+	}
+
 }
