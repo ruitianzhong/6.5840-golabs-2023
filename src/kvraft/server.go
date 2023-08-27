@@ -23,8 +23,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type OpType string
 
 const (
-	PutAppend OpType = "PutAppend"
-	GET       OpType = "Get"
+	PUT    OpType = "Put"
+	GET    OpType = "Get"
+	APPEND OpType = "Append"
 )
 
 type Op struct {
@@ -100,7 +101,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	op := Op{OpType: PutAppend, PutAppend: *args, ClientId: args.ClientId, SeqNum: args.SeqNum}
+	op := Op{OpType: OpType(args.Op), PutAppend: *args, ClientId: args.ClientId, SeqNum: args.SeqNum}
 	_, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -208,11 +209,13 @@ func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
 
 	reply.Type = op.OpType
 
-	if op.OpType == PutAppend {
+	if op.OpType == PUT || op.OpType == APPEND {
 
 		v, ok := kv.kvMap[op.PutAppend.Key]
-		if ok {
+		if ok && op.OpType == APPEND {
 			v += op.PutAppend.Value
+		} else {
+			v = op.PutAppend.Value
 		}
 		kv.kvMap[op.PutAppend.Key] = v
 		reply.PutAppendReply.Err = OK
