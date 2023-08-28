@@ -662,7 +662,7 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 	}
 }
 func (rf *Raft) haveLogToSend(server int) bool {
-	return rf.getPrevLogIndex() > rf.nextIndex[server]
+	return rf.getPrevLogIndex() >= rf.nextIndex[server] // cause of performance bottleneck
 }
 func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 	count := 0
@@ -673,7 +673,7 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 			rf.mu.Unlock()
 			return
 		}
-		if rf.haveLogToSend(server) || count%2 == 0 {
+		if rf.haveLogToSend(server) || count%8 == 0 {
 			go func() {
 				args := AppendEntriesArgs{}
 				reply := AppendEntriesReply{}
@@ -705,7 +705,7 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 			}()
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(20) * time.Millisecond)
+		time.Sleep(time.Duration(5) * time.Millisecond)
 		count++
 	}
 
