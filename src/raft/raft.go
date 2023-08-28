@@ -661,9 +661,11 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
-
+func (rf *Raft) haveLogToSend(server int) bool {
+	return rf.getPrevLogIndex() > rf.nextIndex[server]
+}
 func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
-
+	count := 0
 	for !rf.killed() {
 		rf.mu.Lock()
 
@@ -671,38 +673,40 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 			rf.mu.Unlock()
 			return
 		}
+		if rf.haveLogToSend(server) || count%2 == 0 {
+			go func() {
+				args := AppendEntriesArgs{}
+				reply := AppendEntriesReply{}
+				rf.mu.Lock()
 
-		go func() {
-			args := AppendEntriesArgs{}
-			reply := AppendEntriesReply{}
-			rf.mu.Lock()
-
-			if rf.role != LEADER || rf.currentTerm != expectedTerm {
+				if rf.role != LEADER || rf.currentTerm != expectedTerm {
+					rf.mu.Unlock()
+					return
+				}
+				if !rf.initAppendEntries(server, &args) {
+					go rf.asyncSendInstallSnapshot(server)
+				}
+				rf.mu.Unlock() // to send in parallel
+				if !rf.sendAppendEntries(server, &args, &reply) {
+					return
+				}
+				rf.mu.Lock()
+				if rf.role != LEADER || rf.currentTerm != expectedTerm {
+					rf.mu.Unlock()
+					return
+				}
+				RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v entries length: %v to %v",
+					rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entry), server)
+				if !rf.handleAppendEntriesReply(server, args, reply) {
+					rf.mu.Unlock()
+					return
+				}
 				rf.mu.Unlock()
-				return
-			}
-			if !rf.initAppendEntries(server, &args) {
-				go rf.asyncSendInstallSnapshot(server)
-			}
-			rf.mu.Unlock() // to send in parallel
-			if !rf.sendAppendEntries(server, &args, &reply) {
-				return
-			}
-			rf.mu.Lock()
-			if rf.role != LEADER || rf.currentTerm != expectedTerm {
-				rf.mu.Unlock()
-				return
-			}
-			RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v entries length: %v to %v",
-				rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entry), server)
-			if !rf.handleAppendEntriesReply(server, args, reply) {
-				rf.mu.Unlock()
-				return
-			}
-			rf.mu.Unlock()
-		}()
+			}()
+		}
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		time.Sleep(time.Duration(20) * time.Millisecond)
+		count++
 	}
 
 }
