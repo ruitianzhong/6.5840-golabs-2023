@@ -22,6 +22,9 @@ const (
 	rSnapshotInstalled LogTopic = "[Install Snapshot]"
 	rSnapshotStart     LogTopic = "[Start Snapshot] "
 	rSnapshotAccept    LogTopic = "[Accept Snapshot] "
+	rStartElection     LogTopic = "[Start Election] "
+	rVoteGranted       LogTopic = "[Vote Granted] "
+	rVoteRejected      LogTopic = "[Vote Rejected] "
 )
 
 var start time.Time

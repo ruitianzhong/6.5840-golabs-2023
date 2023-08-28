@@ -238,11 +238,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
+		RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+			rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		return
 	} else if rf.currentTerm == args.Term {
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.checkIfUpToDate(args) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
+			rf.received = true
+			RaftDebug(rVoteGranted, "Server %v granted %v vote", rf.me, rf.votedFor)
+		} else {
+			RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+				rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		}
 	} else {
 		rf.currentTerm = args.Term
@@ -250,8 +257,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.checkIfUpToDate(args) {
 			rf.votedFor = args.CandidateID
 			reply.VoteGranted = true
+			RaftDebug(rVoteGranted, "Server %v granted %v vote", rf.me, rf.votedFor)
+			rf.received = true
+
 		} else {
 			rf.votedFor = -1
+			RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+				rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -363,8 +375,8 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 	m := min(args.LeaderCommit, rf.getPrevLogIndex())
 	for rf.commitIndex < m {
 		rf.commitIndex += 1
-		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.unsafeGetLogEntry(rf.commitIndex).Command, rf.commitIndex)
 		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.unsafeGetLogEntry(rf.commitIndex).Command}
+		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.unsafeGetLogEntry(rf.commitIndex).Command, rf.commitIndex)
 	}
 }
 
@@ -556,6 +568,7 @@ func (rf *Raft) ticker() {
 			// start the election
 			rf.PrepareElection()
 			rf.persist()
+			RaftDebug(rStartElection, "Server %v term:%v", rf.me, rf.currentTerm)
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go rf.asyncSendRequestVote(i, rf.currentTerm)
@@ -652,8 +665,8 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 			rf.commitIndex = max(rf.commitIndex, rf.lastIncludedIndex)
 			for rf.commitIndex < end {
 				rf.commitIndex += 1
-				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.translateIndex(rf.commitIndex)].Command, rf.commitIndex)
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.translateIndex(rf.commitIndex)].Command, CommandIndex: rf.commitIndex}
+				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.translateIndex(rf.commitIndex)].Command, rf.commitIndex)
 			}
 		}
 
