@@ -205,14 +205,18 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	if index > rf.lastIncludedIndex {
-		rf.lastIncludedTerm = rf.log[index-rf.lastIncludedIndex-1].Term
-		rf.log = rf.log[index-rf.lastIncludedIndex:]
-		rf.lastIncludedIndex = index
-		rf.snapshot = snapshot
-		rf.persist()
-		RaftDebug(rSnapshotCreate, "Server %v create Snapshot lastIncludedIndex %v lastIncludedTerm %v len(snapshot):%v", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, len(snapshot))
-	}
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if index > rf.lastIncludedIndex {
+			rf.lastIncludedTerm = rf.log[index-rf.lastIncludedIndex-1].Term
+			rf.log = rf.log[index-rf.lastIncludedIndex:]
+			rf.lastIncludedIndex = index
+			rf.snapshot = snapshot
+			rf.persist()
+			RaftDebug(rSnapshotCreate, "Server %v create Snapshot lastIncludedIndex %v lastIncludedTerm %v len(snapshot):%v", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, len(snapshot))
+		}
+	}()
 }
 
 // example RequestVote RPC arguments structure.
