@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,9 @@ type KVServer struct {
 	// Your definitions here.
 	kvMap map[string]string
 	dup   map[int64]CachedReply
+
+	lastApplyIndex int
+	persister      *raft.Persister
 }
 
 type CachedReply struct {
@@ -175,8 +179,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.dup = make(map[int64]CachedReply)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.persister = persister
 	// You may need initialization code here.
+	kv.initSnapshot()
 	go kv.rxMsg()
 
 	return kv
@@ -185,20 +190,30 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 func (kv *KVServer) rxMsg() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		command, ok := msg.Command.(Op)
-		if !ok {
-			panic("Unexpected type")
+		if msg.CommandValid {
+			command, ok := msg.Command.(Op)
+			if !ok {
+				panic("Unexpected type")
+			}
+			kv.mu.Lock()
+			id, seq := command.ClientId, command.SeqNum
+			v, ok := kv.dup[id]
+			if !ok || v.SeqNum < seq {
+				reply := new(CachedReply)
+				kv.applyCommand(reply, command)
+				kv.dup[id] = *reply
+			}
+			kv.lastApplyIndex = msg.CommandIndex
+			kv.mu.Unlock()
+		} else if msg.SnapshotValid {
+			kv.mu.Lock()
+			kv.handleSnapshotMsg(msg)
+			kv.mu.Unlock()
+		} else {
+			panic("Unexpected applyMsg type")
 		}
-
 		kv.mu.Lock()
-		id, seq := command.ClientId, command.SeqNum
-		v, ok := kv.dup[id]
-		if !ok || v.SeqNum < seq {
-			reply := new(CachedReply)
-			kv.applyCommand(reply, command)
-			kv.dup[id] = *reply
-		}
-
+		kv.checkIfNeedSnapshot()
 		kv.mu.Unlock()
 	}
 
@@ -231,4 +246,40 @@ func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
 		panic(op.OpType)
 	}
 
+}
+
+func (kv *KVServer) encodeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.dup)
+	return w.Bytes()
+}
+func (kv *KVServer) decodeSnapshot(snapshot []byte) {
+
+	w := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(w)
+	d.Decode(&kv.kvMap)
+	d.Decode(&kv.dup)
+}
+
+func (kv *KVServer) handleSnapshotMsg(applyMsg raft.ApplyMsg) {
+	if kv.lastApplyIndex < applyMsg.CommandIndex {
+		kv.decodeSnapshot(applyMsg.Snapshot)
+		kv.lastApplyIndex = applyMsg.SnapshotIndex
+	}
+}
+
+func (kv *KVServer) checkIfNeedSnapshot() {
+	if kv.maxraftstate == -1 || kv.persister.RaftStateSize() < int(float32(kv.persister.RaftStateSize())*0.8) {
+		return
+	}
+	kv.rf.Snapshot(kv.lastApplyIndex, kv.encodeSnapshot())
+}
+
+func (kv *KVServer) initSnapshot() {
+	snapshot := kv.persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		kv.decodeSnapshot(snapshot)
+	}
 }
