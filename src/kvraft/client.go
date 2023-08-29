@@ -58,26 +58,37 @@ func (ck *Clerk) Get(key string) string {
 		go ck.asyncSendGet(i%len(ck.servers), &args, ch)
 		t := time.After(100 * time.Millisecond)
 		for {
+			b := false
 			select {
 			case <-t:
-				break
+				b = true
+				i++
+				DPrintf("Client %v Get Timeout leader:%v", ck.clientId, i%len(ck.servers))
 			case reply = <-ch:
 				if reply.Err == ErrWrongLeader {
 					i++
+					DPrintf("Client %v Get WrongLeader:%v", ck.clientId, i%len(ck.servers))
 				} else if reply.Err == OK || reply.Err == ErrNoKey {
 					ok = true
+					DPrintf("Client %v Get %v", ck.clientId, reply.Err)
+				} else if reply.Err == ErrDisconnected {
+					i++
 				}
+				b = true
+			}
+			if b {
 				break
 			}
-
 		}
 
 	}
 	ck.cachedLeader = i % len(ck.servers)
 	ck.seqNumber += 1
 	if reply.Err == ErrNoKey {
+		DPrintf("Client  %v No Key %v", ck.clientId, key)
 		return ""
 	} else {
+		DPrintf("Client %v GET Key:%v Value:%v", ck.clientId, key, reply.Value)
 		return reply.Value
 	}
 
@@ -98,6 +109,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.SeqNum = ck.seqNumber
+	args.Op = op
 	var reply PutAppendReply
 	ok := false
 	i := ck.cachedLeader
@@ -106,17 +118,28 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		go ck.asyncSendPutAppend(i%len(ck.servers), &args, ch)
 		t := time.After(100 * time.Millisecond)
 		for !ok {
+			b := false
 			select {
 			case reply = <-ch:
 				if reply.Err == OK {
 					ok = true
+					DPrintf("Client %v PutAppend OK Leader:%v Seq %v", ck.clientId, i%len(ck.servers), ck.seqNumber)
 				} else if reply.Err == ErrWrongLeader {
+					DPrintf("Client %v PutAppend WrongLeader Leader:%v Seq %v", ck.clientId, i%len(ck.servers), ck.seqNumber)
+					i++
+				} else if reply.Err == ErrDisconnected {
 					i++
 				}
-				break
+				b = true
 			case <-t:
+				b = true
+				i++
+				DPrintf("Client %v PutAppend Timeout Leader:%v Seq %v", ck.clientId, i%len(ck.servers), ck.seqNumber)
+			}
+			if b {
 				break
 			}
+
 		}
 
 	}
@@ -146,9 +169,11 @@ func (ck *Clerk) asyncSendPutAppend(server int, args *PutAppendArgs, ch chan Put
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
+	DPrintf("Client %v Put Key %v Value:%v", ck.clientId, key, value)
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+	DPrintf("Client %v Append Key:%v Value:%v", ck.clientId, key, value)
 }
 
 func (ck *Clerk) sendPutAppend(server int, args *PutAppendArgs, reply *PutAppendReply) bool {

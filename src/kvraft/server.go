@@ -70,13 +70,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	for !kv.killed() {
-		kv.mu.Lock()
 		currentTerm, _ := kv.rf.GetState()
 		if currentTerm != term {
-			kv.mu.Unlock()
 			reply.Err = ErrWrongLeader
 			return
 		}
+		kv.mu.Lock()
 
 		k, ok := kv.dup[args.ClientId]
 		if ok {
@@ -92,7 +91,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 		}
 		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 
 	// Your code here.
@@ -100,24 +99,23 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
 	op := Op{OpType: OpType(args.Op), PutAppend: *args, ClientId: args.ClientId, SeqNum: args.SeqNum}
 	_, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	for kv.killed() {
-		kv.mu.Lock()
+	for !kv.killed() {
 		currentTerm, _ := kv.rf.GetState()
 		if currentTerm != term {
-			kv.mu.Unlock()
+			DPrintf("KVServer %v term change curTerm:%v expectedTerm:%v", kv.me, currentTerm, term)
 			reply.Err = ErrWrongLeader
 		}
+		kv.mu.Lock()
 		k, ok := kv.dup[op.ClientId]
 		if ok {
 			if k.SeqNum == op.SeqNum {
-				reply.Err = k.GetReply.Err
+				reply.Err = k.PutAppendReply.Err
 				kv.mu.Unlock()
 				return
 			} else if k.SeqNum > op.SeqNum {
@@ -127,7 +125,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 		}
 		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 
 }
@@ -198,6 +196,7 @@ func (kv *KVServer) rxMsg() {
 		if !ok || v.SeqNum < seq {
 			reply := new(CachedReply)
 			kv.applyCommand(reply, command)
+			kv.dup[id] = *reply
 		}
 
 		kv.mu.Unlock()
@@ -208,7 +207,7 @@ func (kv *KVServer) rxMsg() {
 func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
 
 	reply.Type = op.OpType
-
+	reply.SeqNum = op.SeqNum
 	if op.OpType == PUT || op.OpType == APPEND {
 
 		v, ok := kv.kvMap[op.PutAppend.Key]
@@ -228,6 +227,8 @@ func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
 		} else {
 			reply.GetReply.Err = ErrNoKey
 		}
+	} else {
+		panic(op.OpType)
 	}
 
 }
