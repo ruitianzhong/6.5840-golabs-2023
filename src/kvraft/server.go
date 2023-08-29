@@ -182,6 +182,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 	// You may need initialization code here.
 	kv.initSnapshot()
+	DPrintf("KVServer %v starting lastApplyIndex:%v", kv.me, kv.lastApplyIndex)
 	go kv.rxMsg()
 
 	return kv
@@ -203,6 +204,7 @@ func (kv *KVServer) rxMsg() {
 				kv.applyCommand(reply, command)
 				kv.dup[id] = *reply
 			}
+			DPrintf("KVServer %v apply index:%v command:%v", kv.me, msg.CommandIndex, msg.Command)
 			kv.lastApplyIndex = msg.CommandIndex
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
@@ -232,6 +234,7 @@ func (kv *KVServer) applyCommand(reply *CachedReply, op Op) {
 			v = op.PutAppend.Value
 		}
 		kv.kvMap[op.PutAppend.Key] = v
+		DPrintf("KVServer %v set %v = %v", kv.me, op.PutAppend.Key, v)
 		reply.PutAppendReply.Err = OK
 
 	} else if op.OpType == GET {
@@ -253,6 +256,7 @@ func (kv *KVServer) encodeSnapshot() []byte {
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.kvMap)
 	e.Encode(kv.dup)
+	e.Encode(kv.lastApplyIndex)
 	return w.Bytes()
 }
 func (kv *KVServer) decodeSnapshot(snapshot []byte) {
@@ -261,12 +265,16 @@ func (kv *KVServer) decodeSnapshot(snapshot []byte) {
 	d := labgob.NewDecoder(w)
 	d.Decode(&kv.kvMap)
 	d.Decode(&kv.dup)
+	d.Decode(&kv.lastApplyIndex)
 }
 
 func (kv *KVServer) handleSnapshotMsg(applyMsg raft.ApplyMsg) {
-	if kv.lastApplyIndex < applyMsg.CommandIndex {
+	if kv.lastApplyIndex < applyMsg.SnapshotIndex {
+		DPrintf("KVServer %v received snapshot preIndex:%v now:%v", kv.me, kv.lastApplyIndex, applyMsg.SnapshotIndex)
 		kv.decodeSnapshot(applyMsg.Snapshot)
 		kv.lastApplyIndex = applyMsg.SnapshotIndex
+	} else {
+		DPrintf("KVServer %v received kv.index:%v applyMsg.index:%v", kv.me, kv.lastApplyIndex, applyMsg.SnapshotIndex)
 	}
 }
 
@@ -275,6 +283,7 @@ func (kv *KVServer) checkIfNeedSnapshot() {
 		return
 	}
 	kv.rf.Snapshot(kv.lastApplyIndex, kv.encodeSnapshot())
+	DPrintf("KVServer %v Snapshot lastApplyIndex %v", kv.me, kv.lastApplyIndex)
 }
 
 func (kv *KVServer) initSnapshot() {
