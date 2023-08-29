@@ -56,7 +56,7 @@ func (ck *Clerk) Get(key string) string {
 	for !ok {
 		ch := make(chan GetReply)
 		go ck.asyncSendGet(i%len(ck.servers), &args, ch)
-		t := time.After(100 * time.Millisecond)
+		t := time.After(40 * time.Millisecond)
 		for {
 			b := false
 			select {
@@ -116,7 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for !ok {
 		ch := make(chan PutAppendReply, 1)
 		go ck.asyncSendPutAppend(i%len(ck.servers), &args, ch)
-		t := time.After(100 * time.Millisecond)
+		t := time.After(40 * time.Millisecond)
 		for !ok {
 			b := false
 			select {

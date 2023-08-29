@@ -561,7 +561,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 200 + (rand.Int63() % 200)
+		ms := 150 + (rand.Int63() % 125)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.role == LEADER {
@@ -630,7 +630,7 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 			rf.mu.Unlock()
 		}()
 		rf.mu.Unlock()
-		time.Sleep(110 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
 
 }
@@ -675,7 +675,7 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 		}
 
 		rf.mu.Unlock()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 func (rf *Raft) haveLogToSend(server int) bool {
