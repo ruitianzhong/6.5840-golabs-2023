@@ -11,6 +11,9 @@ import "math/big"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
+
+	clientId  int64
+	seqNumber int
 	// Your data here.
 }
 
@@ -25,11 +28,14 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// Your code here.
+	ck.clientId = nrand()
 	return ck
 }
 
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
+	args.ClientId = ck.clientId
+	args.SeqNumber = ck.seqNumber
 	// Your code here.
 	args.Num = num
 	for {
@@ -38,6 +44,7 @@ func (ck *Clerk) Query(num int) Config {
 			var reply QueryReply
 			ok := srv.Call("ShardCtrler.Query", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.seqNumber++
 				return reply.Config
 			}
 		}
@@ -49,6 +56,8 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
+	args.ClientId = ck.clientId
+	args.SeqNumber = ck.seqNumber
 
 	for {
 		// try each known server.
@@ -56,6 +65,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 			var reply JoinReply
 			ok := srv.Call("ShardCtrler.Join", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.seqNumber++
 				return
 			}
 		}
@@ -67,13 +77,15 @@ func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
-
+	args.ClientId = ck.clientId
+	args.SeqNumber = ck.seqNumber
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply LeaveReply
 			ok := srv.Call("ShardCtrler.Leave", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.seqNumber++
 				return
 			}
 		}
@@ -86,6 +98,8 @@ func (ck *Clerk) Move(shard int, gid int) {
 	// Your code here.
 	args.Shard = shard
 	args.GID = gid
+	args.ClientId = ck.clientId
+	args.SeqNumber = ck.seqNumber
 
 	for {
 		// try each known server.
@@ -93,6 +107,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 			var reply MoveReply
 			ok := srv.Call("ShardCtrler.Move", args, &reply)
 			if ok && reply.WrongLeader == false {
+				ck.seqNumber++
 				return
 			}
 		}
