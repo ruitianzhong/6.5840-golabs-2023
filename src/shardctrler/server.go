@@ -1,6 +1,7 @@
 package shardctrler
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ type ShardCtrler struct {
 	configs []Config // indexed by config num
 
 	dup map[int64]CtrlerReply
+
+	ngroup int
 }
 type CtrlerOpType string
 
@@ -251,17 +254,145 @@ func (sc *ShardCtrler) rxMsg() {
 }
 
 func (sc *ShardCtrler) applyJoin(op Op) {
+	args, reply := op.JoinArgs, JoinReply{}
+
+	creply := CtrlerReply{CtrlerOpType: JOIN, JoinReply: reply, SeqNumber: op.SeqNumber}
+	sc.dup[op.ClientId] = creply
+	reply.Err = OK
+	config := cloneConfig(sc.configs[len(sc.configs)-1])
+	config.Num++
+	for k, v := range args.Servers {
+		config.Groups[k] = v
+	}
+	sc.ngroup += len(args.Servers)
+	sc.rebalance(&config)
+	sc.configs = append(sc.configs, config)
 
 }
 
 func (sc *ShardCtrler) applyLeave(op Op) {
+	args, reply := op.LeaveArgs, LeaveReply{}
+
+	creply := CtrlerReply{CtrlerOpType: LEAVE, LeaveReply: reply, SeqNumber: op.SeqNumber}
+	sc.dup[op.ClientId] = creply
+	reply.Err = OK
+	config := cloneConfig(sc.configs[len(sc.configs)-1])
+	config.Num++
+	for i := 0; i < len(args.GIDs); i++ {
+		for j := 0; j < NShards; j++ {
+			if config.Shards[j] == args.GIDs[i] {
+				config.Shards[j] = 0
+			}
+		}
+		delete(config.Groups, args.GIDs[i])
+	}
+	sc.ngroup -= len(args.GIDs)
+	sc.rebalance(&config)
+	sc.configs = append(sc.configs, config)
 
 }
 
 func (sc *ShardCtrler) applyQuery(op Op) {
-
+	args, reply := op.QueryArgs, QueryReply{}
+	i := args.Num
+	if args.Num == -1 || args.Num >= len(sc.configs) {
+		i = len(sc.configs) - 1
+	}
+	reply.Config = cloneConfig(sc.configs[i])
+	reply.Err = OK
+	creply := CtrlerReply{CtrlerOpType: QUERY, QueryReply: reply, SeqNumber: op.SeqNumber}
+	sc.dup[op.ClientId] = creply
 }
 
 func (sc *ShardCtrler) applyMove(op Op) {
+	args, reply := op.MoveArgs, MoveReply{}
+	config := cloneConfig(sc.configs[len(sc.configs)-1])
+	config.Shards[args.Shard] = args.GID
+	config.Num++
+	reply.Err = OK
+	creply := CtrlerReply{CtrlerOpType: MOVE, MoveReply: reply, SeqNumber: op.SeqNumber}
+	sc.dup[op.ClientId] = creply
+	sc.configs = append(sc.configs, config)
+}
+
+func cloneConfig(config Config) Config {
+	nconfig := Config{Num: config.Num}
+	nconfig.Shards = config.Shards
+	nconfig.Groups = map[int][]string{}
+	for k, v := range config.Groups {
+		nconfig.Groups[k] = v
+	}
+	return nconfig
+}
+
+func (sc *ShardCtrler) rebalance(config *Config) {
+
+	g2s, pending := sc.group2Shards(config)
+	target := makeTarget(NShards, sc.ngroup)
+	for i := 0; i < sc.ngroup; i++ {
+		d := len(g2s[i].shard) - target[i]
+		if d > 0 {
+			pending = append(pending, g2s[i].shard[:d]...)
+			g2s[i].shard = g2s[i].shard[d:]
+		} else if d < 0 {
+			g2s[i].shard = append(g2s[i].shard, pending[:-d]...)
+			pending = pending[-d:]
+		}
+	}
+
+	for i := 0; i < sc.ngroup; i++ {
+		for j := 0; j < len(g2s[i].shard); j++ {
+			config.Shards[g2s[i].shard[j]] = g2s[i].gid
+		}
+	}
 
 }
+func makeTarget(nshard, ngroup int) []int {
+	if ngroup == 0 {
+		return nil
+	}
+	arr := make([]int, ngroup)
+	r := nshard % ngroup
+	for i := 0; i < ngroup; i++ {
+		arr[i] = nshard / ngroup
+		if i < r {
+			arr[i]++
+		}
+	}
+	return arr
+}
+
+func (sc *ShardCtrler) group2Shards(config *Config) ([]Groups2Shards, []int) {
+	m := map[int][]int{}
+	for k := range config.Groups {
+		m[k] = []int{}
+	}
+	for i := 0; i < NShards; i++ {
+		m[config.Shards[i]] = append(m[config.Shards[i]], i)
+	}
+	arr := []Groups2Shards{}
+	pending := []int{}
+	for k, v := range m {
+		if k != 0 {
+			arr = append(arr, Groups2Shards{gid: k, shard: v})
+		} else {
+			pending = append(pending, v...)
+		}
+	}
+	sort.Sort(Key(arr))
+	return arr, pending
+}
+
+type Groups2Shards struct {
+	gid   int
+	shard []int
+}
+type Key []Groups2Shards
+
+func (k Key) Less(i, j int) bool {
+	return len(k[i].shard) > len(k[j].shard) || (len(k[i].shard) == len(k[j].shard) && k[i].gid > k[j].gid)
+}
+
+func (k Key) Len() int { return len(k) }
+
+func (k Key) Swap(i, j int) { k[i], k[j] = k[j], k[i] }
