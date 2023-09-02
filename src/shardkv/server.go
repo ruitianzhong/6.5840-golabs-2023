@@ -63,7 +63,7 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap          map[string]string
+	// kvMap          map[string]string
 	dup            map[int64]CachedReply
 	mp             map[ShardKey]Shard
 	lastApplyIndex int
@@ -238,9 +238,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.config.Groups = make(map[int][]string)
-
-	kv.kvMap = make(map[string]string)
 	kv.dup = make(map[int64]CachedReply)
+	kv.mp = map[ShardKey]Shard{}
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.persister = persister
@@ -302,28 +301,54 @@ func (kv *ShardKV) applyCommand(reply *CachedReply, op Op) {
 			reply.PutAppendReply.Err = ErrWrongGroup
 			return
 		}
+		shard := key2shard(op.PutAppend.Key)
+		key := ShardKey{Shard: shard, Num: kv.config.Num}
+		s, exist := kv.mp[key]
 
-		v, ok := kv.kvMap[op.PutAppend.Key]
-		if ok && op.OpType == APPEND {
-			v += op.PutAppend.Value
+		if exist {
+			e, o := s.Result[op.ClientId]
+
+			if !o || e.SeqNum < op.SeqNum {
+
+				v, ok := s.KVMap[op.PutAppend.Key]
+				if ok && op.OpType == APPEND {
+					v += op.PutAppend.Value
+				} else {
+					v = op.PutAppend.Value
+				}
+				s.KVMap[op.PutAppend.Key] = v
+				DPrintf("ShardServer %v set %v = %v", kv.me, op.PutAppend.Key, v)
+				reply.PutAppendReply.Err = OK
+				s.Result[op.ClientId] = *reply
+			} else {
+				*reply = e
+			}
 		} else {
-			v = op.PutAppend.Value
+			reply.PutAppendReply.Err = ErrRetry
 		}
-		kv.kvMap[op.PutAppend.Key] = v
-		DPrintf("ShardServer %v set %v = %v", kv.me, op.PutAppend.Key, v)
-		reply.PutAppendReply.Err = OK
 
 	} else if op.OpType == GET {
 		if kv.checkKey(op.Get.Key) {
 			reply.GetReply.Err = ErrWrongGroup
 			return
 		}
-		v, ok := kv.kvMap[op.Get.Key]
-		if ok {
-			reply.GetReply.Value = v
-			reply.GetReply.Err = OK
-		} else {
-			reply.GetReply.Err = ErrNoKey
+		shard := key2shard(op.PutAppend.Key)
+		key := ShardKey{Shard: shard, Num: kv.config.Num}
+		s, exist := kv.mp[key]
+		if exist {
+			e, o := s.Result[op.ClientId]
+			if !o || e.SeqNum < op.SeqNum {
+				v, ok := s.KVMap[op.Get.Key]
+				if ok {
+					reply.GetReply.Value = v
+					reply.GetReply.Err = OK
+				} else {
+					reply.GetReply.Err = ErrNoKey
+				}
+				s.Result[op.ClientId] = *reply
+			} else {
+				*reply = e
+			}
 		}
 	} else {
 		panic(op.OpType)
@@ -381,7 +406,7 @@ func (kv *ShardKV) sendInstallShard(shard, config, gid int) {
 func (kv *ShardKV) encodeSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.kvMap)
+	e.Encode(kv.mp)
 	e.Encode(kv.dup)
 	e.Encode(kv.lastApplyIndex)
 	return w.Bytes()
@@ -390,7 +415,7 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 
 	w := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(w)
-	d.Decode(&kv.kvMap)
+	d.Decode(&kv.mp)
 	d.Decode(&kv.dup)
 	d.Decode(&kv.lastApplyIndex)
 }

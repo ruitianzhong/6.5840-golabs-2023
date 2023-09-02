@@ -72,6 +72,7 @@ func (ck *Clerk) Get(key string) string {
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
+			retry:
 				srv := ck.make_end(servers[si])
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
@@ -80,6 +81,11 @@ func (ck *Clerk) Get(key string) string {
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
+				}
+
+				if ok && (reply.Err == ErrRetry) {
+					time.Sleep(20 * time.Millisecond)
+					goto retry
 				}
 				// ... not ok, or ErrWrongLeader
 			}
