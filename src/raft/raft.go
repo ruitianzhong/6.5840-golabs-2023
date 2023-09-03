@@ -92,6 +92,8 @@ type Raft struct {
 	lastIncludedTerm  int
 
 	snapshot []byte // store the snapshot & raftState simultaneously
+
+	gid int
 }
 
 type AppendEntriesArgs struct {
@@ -132,6 +134,10 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Unlock()
 	// Your code here (2A).
 	return term, isleader
+}
+
+func (rf *Raft) SetGid(gid int) {
+	rf.gid = gid
 }
 
 // save Raft's persistent state to stable storage,
@@ -214,7 +220,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedIndex = index
 			rf.snapshot = snapshot
 			rf.persist()
-			RaftDebug(rSnapshotCreate, "Server %v create Snapshot lastIncludedIndex %v lastIncludedTerm %v len(snapshot):%v", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, len(snapshot))
+			RaftDebug(rSnapshotCreate, "Server %v gid %v create Snapshot lastIncludedIndex %v lastIncludedTerm %v len(snapshot):%v", rf.me, rf.gid, rf.lastIncludedIndex, rf.lastIncludedTerm, len(snapshot))
 		}
 	}()
 }
@@ -242,18 +248,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
-		RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
-			rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
+		RaftDebug(rVoteRejected, "Server %v gid %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+			rf.me, rf.gid, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		return
 	} else if rf.currentTerm == args.Term {
 		if (rf.votedFor == -1 || rf.votedFor == args.CandidateID) && rf.checkIfUpToDate(args) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 			rf.received = true
-			RaftDebug(rVoteGranted, "Server %v granted %v vote", rf.me, rf.votedFor)
+			RaftDebug(rVoteGranted, "Server %v gid %v granted %v vote", rf.me, rf.gid, rf.votedFor)
 		} else {
-			RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
-				rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
+			RaftDebug(rVoteRejected, "Server %v gid %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+				rf.me, rf.gid, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		}
 	} else {
 		rf.currentTerm = args.Term
@@ -261,13 +267,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.checkIfUpToDate(args) {
 			rf.votedFor = args.CandidateID
 			reply.VoteGranted = true
-			RaftDebug(rVoteGranted, "Server %v granted %v vote", rf.me, rf.votedFor)
+			RaftDebug(rVoteGranted, "Server %v gid %v granted %v vote", rf.me, rf.gid, rf.votedFor)
 			rf.received = true
 
 		} else {
 			rf.votedFor = -1
-			RaftDebug(rVoteRejected, "Server %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
-				rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
+			RaftDebug(rVoteRejected, "Server %v gid %v term:%v index:%v lastTerm:%v rejected %v  term:%v index:%v  lastTerm:%v vote",
+				rf.me, rf.gid, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm(), args.CandidateID, args.Term, args.LastLogIndex, args.LastLogTerm)
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -309,7 +315,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.lastIncludedTerm = args.LastIncludedTerm
 		rf.commitIndex = max(rf.lastIncludedIndex, rf.commitIndex)
 		rf.persist()
-		RaftDebug(rSnapshotAccept, "Server %v Accept Snapshot index:%v term:%v len:%v ", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.snapshot))
+		RaftDebug(rSnapshotAccept, "Server %v gid %v Accept Snapshot index:%v term:%v len:%v ", rf.me, rf.gid, rf.lastIncludedIndex, rf.lastIncludedTerm, len(rf.snapshot))
 		applyMsg := ApplyMsg{SnapshotValid: true, SnapshotTerm: rf.lastIncludedTerm, SnapshotIndex: rf.lastIncludedIndex, Snapshot: rf.snapshot}
 		rf.applyCh <- applyMsg
 	}
@@ -380,7 +386,7 @@ func (rf *Raft) updateFollowerCommitIndex(args *AppendEntriesArgs) {
 	for rf.commitIndex < m {
 		rf.commitIndex += 1
 		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: rf.commitIndex, Command: rf.unsafeGetLogEntry(rf.commitIndex).Command}
-		RaftDebug(rCommit, "Server %v Follower commits commmand %v index:%v", rf.me, rf.unsafeGetLogEntry(rf.commitIndex).Command, rf.commitIndex)
+		RaftDebug(rCommit, "Server %v gid %v Follower commits commmand %v index:%v", rf.me, rf.gid, rf.unsafeGetLogEntry(rf.commitIndex).Command, rf.commitIndex)
 	}
 }
 
@@ -405,7 +411,7 @@ func (rf *Raft) handleConflict(args *AppendEntriesArgs, reply *AppendEntriesRepl
 			for i < len(args.Entry) && i+prevIndex+1 <= lastIndex {
 				if args.Entry[i].Term != rf.unsafeGetLogEntry(i+prevIndex+1).Term {
 					ok = false
-					RaftDebug(rAppendReject, "Server %v Client finds conflict index:%v/%v args.Entry[i].Term:%v %v ", rf.me, i, i+prevIndex+1, args.Entry[i].Term)
+					RaftDebug(rAppendReject, "Server %v gid %v Client finds conflict index:%v/%v args.Entry[i].Term:%v %v ", rf.me, rf.gid, i, i+prevIndex+1, args.Entry[i].Term)
 					break
 				}
 				i += 1
@@ -572,7 +578,7 @@ func (rf *Raft) ticker() {
 			// start the election
 			rf.PrepareElection()
 			rf.persist()
-			RaftDebug(rStartElection, "Server %v term:%v", rf.me, rf.currentTerm)
+			RaftDebug(rStartElection, "Server %v gid %v term:%v", rf.me, rf.gid, rf.currentTerm)
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go rf.asyncSendRequestVote(i, rf.currentTerm)
@@ -636,8 +642,8 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 }
 
 func (rf *Raft) transfer2Leader() {
-	RaftDebug(rLeader, "Server %v term:%v lastIndex:%v lastTerm:%v",
-		rf.me, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm())
+	RaftDebug(rLeader, "Server %v gid %v term:%v lastIndex:%v lastTerm:%v",
+		rf.me, rf.gid, rf.currentTerm, rf.getPrevLogIndex(), rf.getPrevLogTerm())
 	rf.role = LEADER
 	rf.initNextIndexAndMatchIndex()
 	rf.received = false
@@ -670,7 +676,7 @@ func (rf *Raft) updateMatchIndex(expectedTerm int) {
 			for rf.commitIndex < end {
 				rf.commitIndex += 1
 				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[rf.translateIndex(rf.commitIndex)].Command, CommandIndex: rf.commitIndex}
-				RaftDebug(rCommit, "Server %v LEADER  commits commmand %v index:%v", rf.me, rf.log[rf.translateIndex(rf.commitIndex)].Command, rf.commitIndex)
+				RaftDebug(rCommit, "Server %v gid %v LEADER  commits commmand %v index:%v", rf.me, rf.gid, rf.log[rf.translateIndex(rf.commitIndex)].Command, rf.commitIndex)
 			}
 		}
 
@@ -712,8 +718,8 @@ func (rf *Raft) asyncSendAppendEntries(server int, expectedTerm int) {
 					rf.mu.Unlock()
 					return
 				}
-				RaftDebug(rAppendSend, "Server %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v entries length: %v to %v",
-					rf.me, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entry), server)
+				RaftDebug(rAppendSend, "Server %v gid %v LEADER term:%v prevLogIndex:%v prevLogTerm:%v entries length: %v to %v",
+					rf.me, rf.gid, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, len(args.Entry), server)
 				if !rf.handleAppendEntriesReply(server, args, reply) {
 					rf.mu.Unlock()
 					return
@@ -774,8 +780,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 		if args.ContainEntry {
 			rf.matchIndex[server] = max(args.PrevLogIndex+len(args.Entry), rf.matchIndex[server])
 			rf.nextIndex[server] = max(rf.nextIndex[server], args.PrevLogIndex+len(args.Entry)+1)
-			RaftDebug(rAppendAccept, "Server %v Leader received from %v next:%v match:%v",
-				rf.me, server, rf.nextIndex[server], rf.matchIndex[server])
+			RaftDebug(rAppendAccept, "Server %v gid %v Leader received from %v next:%v match:%v",
+				rf.me, rf.gid, server, rf.nextIndex[server], rf.matchIndex[server])
 		}
 		return true
 	}
@@ -787,8 +793,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args AppendEntriesArgs, rep
 	}
 	// TODO: Update some states of leader
 	rf.backoff(server, reply)
-	RaftDebug(rAppendReject, "Server %v Leader received from %v next:%v match:%v XIndex:%v XTerm:%v",
-		rf.me, server, rf.nextIndex[server], rf.matchIndex[server], reply.XIndex, reply.XTerm)
+	RaftDebug(rAppendReject, "Server %v gid %v Leader received from %v next:%v match:%v XIndex:%v XTerm:%v",
+		rf.me, rf.gid, rf.nextIndex[server], rf.nextIndex[server], rf.matchIndex[server], reply.XIndex, reply.XTerm)
 	return true
 }
 
@@ -813,7 +819,7 @@ func (rf *Raft) initAppendEntries(server int, args *AppendEntriesArgs) bool {
 	args.LeaderID = rf.me
 	args.Term = rf.currentTerm
 	if rf.translateIndex(rf.nextIndex[server]) < 0 {
-		RaftDebug(rSnapshotStart, "Server %v Start Snapshot len:%v lastIncludeTerm:%v lastIncludedIndex:%v", rf.me, len(rf.persister.ReadSnapshot()), rf.lastIncludedIndex, rf.lastIncludedTerm)
+		RaftDebug(rSnapshotStart, "Server %v gid %v Start Snapshot len:%v lastIncludeTerm:%v lastIncludedIndex:%v", rf.me, rf.gid, len(rf.persister.ReadSnapshot()), rf.lastIncludedIndex, rf.lastIncludedTerm)
 		args.ContainEntry = false
 		args.PrevLogIndex, args.PrevLogTerm = rf.lastIncludedIndex, rf.lastIncludedTerm
 		return false
