@@ -30,6 +30,7 @@ const (
 	APPEND       OpType = "Append"
 	CONFIG       OpType = "Config"
 	InstallShard OpType = "InstallShard"
+	DeleteShard  OpType = "DeleteShard"
 )
 
 type Op struct {
@@ -42,8 +43,9 @@ type Op struct {
 	ClientId  int64
 	SeqNum    int
 
-	Config       shardctrler.Config
-	InstallShard InstallShardArgs
+	Config          shardctrler.Config
+	InstallShard    InstallShardArgs
+	DeleteShardArgs DeleteShardArgs
 }
 
 type CachedReply struct {
@@ -63,7 +65,6 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	// kvMap          map[string]string
 	dup            map[int64]CachedReply
 	mp             map[ShardKey]Shard
 	lastApplyIndex int
@@ -73,12 +74,16 @@ type ShardKV struct {
 	config         shardctrler.Config
 
 	curConfigNum [shardctrler.NShards]int
+
+	received int
+
+	sendMap map[ShardKey]Shard
 }
 
 type Shard struct {
 	KVMap  map[string]string
 	Result map[int64]CachedReply
-	Mark   bool
+	Gid    int
 }
 
 type ShardKey struct {
@@ -91,6 +96,14 @@ type InstallShardArgs struct {
 }
 
 type InstallShardReply struct {
+	Err Err
+}
+
+type DeleteShardArgs struct {
+	Key ShardKey
+}
+
+type DeleteShardReply struct {
 	Err Err
 }
 
@@ -243,12 +256,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.persister = persister
+	kv.sendMap = map[ShardKey]Shard{}
 	// You may need initialization code here.
 	kv.initSnapshot()
 	kv.maxraftstate = maxraftstate
 	DPrintf("ShardServer %v starting lastApplyIndex:%v", kv.me, kv.lastApplyIndex)
 	go kv.rxMsg()
 	go kv.updateConfig()
+	go kv.sendShard()
 	return kv
 }
 
@@ -273,6 +288,8 @@ func (kv *ShardKV) rxMsg() {
 				kv.applyConfigCommand(command)
 			} else if command.OpType == InstallShard {
 				kv.applyInstallShardCommand(command)
+			} else if command.OpType == DeleteShard {
+				kv.applyDeleteShardCommand(command)
 			}
 
 			DPrintf("ShardServer %v apply index:%v command:%v", kv.me, msg.CommandIndex, msg.Command)
@@ -288,6 +305,17 @@ func (kv *ShardKV) rxMsg() {
 		kv.mu.Lock()
 		kv.checkIfNeedSnapshot()
 		kv.mu.Unlock()
+	}
+
+}
+
+func (kv *ShardKV) applyDeleteShardCommand(op Op) {
+
+	key := op.DeleteShardArgs.Key
+	_, ok := kv.mp[key]
+	if ok {
+		delete(kv.mp, key)
+		delete(kv.sendMap, key)
 	}
 
 }
@@ -366,12 +394,28 @@ func (kv *ShardKV) applyConfigCommand(op Op) {
 		oc, nc := kv.config, op.Config
 		for i := 0; i < shardctrler.NShards; i++ {
 			if oc.Shards[i] == kv.me && nc.Shards[i] != kv.me {
-				go kv.sendInstallShard(i, nc.Num, nc.Shards[i])
+				key := ShardKey{Num: nc.Num, Shard: i}
+				s := copyShard(kv.mp[key])
+				s.Gid = nc.Shards[i]
+				kv.sendMap[key] = s
+			} else if oc.Shards[i] == kv.me && nc.Shards[i] == kv.me {
+				key := ShardKey{Num: oc.Num, Shard: i}
+				shard, ok := kv.mp[key]
+				if !ok {
+					panic("Unexpected behavior")
+				}
+				key.Num++
+				kv.mp[key] = shard
+			} else if oc.Shards[i] == 0 && nc.Shards[i] == kv.me {
+				key := ShardKey{Num: nc.Num, Shard: i}
+				shard := initShard()
+				kv.mp[key] = shard
+			} else if oc.Shards[i] != kv.me && nc.Shards[i] == kv.me {
+				kv.received++
 			}
 		}
 
 		kv.config = op.Config
-
 	}
 }
 func (kv *ShardKV) applyInstallShardCommand(op Op) {
@@ -379,36 +423,68 @@ func (kv *ShardKV) applyInstallShardCommand(op Op) {
 	if kv.curConfigNum[op.InstallShard.ShardKey.Shard] < op.InstallShard.ShardKey.Num {
 		kv.curConfigNum[op.InstallShard.ShardKey.Shard] = op.InstallShard.ShardKey.Num
 		kv.mp[op.InstallShard.ShardKey] = op.InstallShard.Shard
+		kv.received--
 	}
 	kv.mu.Unlock()
 }
-func (kv *ShardKV) sendInstallShard(shard, config, gid int) {
+func (kv *ShardKV) sendInstallShard(key ShardKey, shard Shard) {
+	args := InstallShardArgs{}
+	args.ShardKey = key
+	args.Shard = shard
+	gid := shard.Gid
+	config := kv.clerk.Query(key.Num)
+	servers, ok := config.Groups[gid]
+	if !ok {
+		panic("")
+	}
 	for {
-		if servers, ok := kv.config.Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := kv.make_end(servers[si])
-				var reply InstallShardReply
-				args := InstallShardArgs{}
-				args.ShardKey = ShardKey{Shard: shard, Num: config}
-				kv.mu.Lock()
-				args.Shard = kv.mp[args.ShardKey]
-				kv.mu.Unlock()
-				ok := srv.Call("ShardKV.InstallShard", &args, &reply)
-				if ok && reply.Err == OK {
-					return
-				}
+		for si := 0; si < len(servers); si++ {
+			srv := kv.make_end(servers[si])
+			var reply InstallShardReply
+			ok := srv.Call("ShardKV.InstallShard", &args, &reply)
+			if ok && reply.Err == OK {
+				darg := DeleteShardArgs{}
+				darg.Key = key
+				kv.deleteShard(&darg)
+				return
 			}
 		}
+
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
+func copyShard(shard Shard) Shard {
+	nshard := Shard{}
+	result, kvmap := map[int64]CachedReply{}, map[string]string{}
+	for k, v := range shard.Result {
+		result[k] = v
+	}
+	for k, v := range shard.KVMap {
+		kvmap[k] = v
+
+	}
+	nshard.Result = result
+	nshard.KVMap = kvmap
+	return nshard
+}
+
+func initShard() Shard {
+	shard := Shard{}
+	shard.KVMap = make(map[string]string)
+	shard.Result = make(map[int64]CachedReply)
+	return shard
+}
 func (kv *ShardKV) encodeSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.mp)
 	e.Encode(kv.dup)
 	e.Encode(kv.lastApplyIndex)
+	e.Encode(kv.config)
+	e.Encode(kv.curConfigNum)
+	e.Encode(kv.received)
+	e.Encode(kv.sendMap)
 	return w.Bytes()
 }
 func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
@@ -418,6 +494,10 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	d.Decode(&kv.mp)
 	d.Decode(&kv.dup)
 	d.Decode(&kv.lastApplyIndex)
+	d.Decode(&kv.config)
+	d.Decode(&kv.curConfigNum)
+	d.Decode(&kv.received)
+	d.Decode(&kv.sendMap)
 }
 
 func (kv *ShardKV) handleSnapshotMsg(applyMsg raft.ApplyMsg) {
@@ -447,12 +527,12 @@ func (kv *ShardKV) initSnapshot() {
 
 func (kv *ShardKV) updateConfig() {
 	for !kv.killed() {
+		kv.mu.Lock()
 		newConfig := kv.clerk.Query(kv.config.Num + 1)
 		oldConfig := kv.config
-		kv.mu.Lock()
-		if oldConfig.Num == newConfig.Num {
+		if oldConfig.Num == newConfig.Num || len(kv.sendMap) != 0 || kv.received != 0 {
 			kv.mu.Unlock()
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		kv.mu.Unlock()
@@ -461,12 +541,12 @@ func (kv *ShardKV) updateConfig() {
 		for {
 			_, _, isLeader := kv.rf.Start(args)
 			if !isLeader {
-				break
+				time.Sleep(20 * time.Millisecond) // can not exit
 			}
-			time.Sleep(30 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
-			if kv.config.Num == newConfig.Num {
+			if kv.config.Num >= newConfig.Num {
 				break
 			}
 		}
@@ -503,4 +583,37 @@ func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply
 		kv.mu.Unlock()
 	}
 
+}
+
+func (kv *ShardKV) deleteShard(args *DeleteShardArgs) {
+	op := Op{OpType: DeleteShard, DeleteShardArgs: *args}
+	for {
+		_, _, isLeader := kv.rf.Start(op)
+		if !isLeader {
+			time.Sleep(100 * time.Millisecond)
+		} else {
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		kv.mu.Lock()
+		_, ok := kv.mp[args.Key]
+		if !ok {
+			kv.mu.Unlock()
+			return
+		}
+		kv.mu.Unlock()
+
+	}
+}
+
+func (kv *ShardKV) sendShard() {
+	for {
+		kv.mu.Lock()
+
+		for k, v := range kv.sendMap {
+			go kv.sendInstallShard(k, v)
+		}
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
 }
