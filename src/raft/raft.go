@@ -287,7 +287,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
-	} else if args.Term > rf.currentTerm {
+	} else if args.Term > rf.currentTerm || rf.role == CANDIDATE {
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
 	}
@@ -567,7 +567,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 150 + (rand.Int63() % 125)
+		ms := 250 + (rand.Int63() % 125)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		if rf.role == LEADER {
@@ -606,15 +606,16 @@ func (rf *Raft) asyncSendRequestVote(server int, expectedTerm int) {
 			return
 		}
 		go func() {
-			args := RequestVoteArgs{}
-			args.CandidateID = rf.me
-			args.Term = expectedTerm
-			args.LastLogIndex, args.LastLogTerm = rf.getPrevLogIndexAndTerm() // initially forget to init index & term
+
 			rf.mu.Lock()
 			if rf.role != CANDIDATE || expectedTerm != rf.currentTerm {
 				rf.mu.Unlock()
 				return
 			}
+			args := RequestVoteArgs{}
+			args.CandidateID = rf.me
+			args.Term = expectedTerm
+			args.LastLogIndex, args.LastLogTerm = rf.getPrevLogIndexAndTerm() // initially forget to init index & term
 			reply := RequestVoteReply{}
 			rf.mu.Unlock() // send RequestVote without lock
 			if !rf.sendRequestVote(server, &args, &reply) {
