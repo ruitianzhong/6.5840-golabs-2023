@@ -8,11 +8,14 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
-import "6.5840/shardctrler"
-import "time"
+import (
+	"crypto/rand"
+	"math/big"
+	"time"
+
+	"6.5840/labrpc"
+	"6.5840/shardctrler"
+)
 
 // which shard is a key in?
 // please use this function,
@@ -65,6 +68,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClientId = ck.clientId
+	args.SeqNum = ck.seqNumber
 
 	for {
 		shard := key2shard(key)
@@ -72,21 +77,19 @@ func (ck *Clerk) Get(key string) string {
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
-			retry:
 				srv := ck.make_end(servers[si])
 				var reply GetReply
+				DPrintf("Client %v seq %v ready to send Get key %v ", ck.clientId, ck.seqNumber, args.Key)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.seqNumber++
 					return reply.Value
 				}
+				DPrintf("Client %v seq %v failed to Get key %v due to %v ok:%v", ck.clientId, ck.seqNumber, args.Key, reply.Err, ok)
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
 
-				if ok && (reply.Err == ErrRetry) {
-					time.Sleep(20 * time.Millisecond)
-					goto retry
-				}
 				// ... not ok, or ErrWrongLeader
 			}
 		}
@@ -105,7 +108,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClientId = ck.clientId
+	args.SeqNum = ck.seqNumber
 	for {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -113,14 +117,18 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply
+				DPrintf("Client %v seq %v ready to send %v key %v value %v", ck.clientId, ck.seqNumber, args.Op, args.Key, args.Value)
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					ck.seqNumber++
 					return
 				}
+				DPrintf("Client %v seq %v failed to %v key %v due to %v ok:%v", ck.clientId, ck.seqNumber, args.Op, args.Key, reply.Err, ok)
 				if ok && reply.Err == ErrWrongGroup {
 					break
 				}
 				// ... not ok, or ErrWrongLeader
+
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
