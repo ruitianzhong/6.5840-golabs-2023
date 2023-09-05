@@ -273,7 +273,7 @@ func (kv *ShardKV) rxMsg() {
 			if command.OpType == GET || command.OpType == PUT || command.OpType == APPEND {
 				id, seq := command.ClientId, command.SeqNum
 				v, ok := kv.dup[id]
-				if !ok || v.SeqNum < seq {
+				if !ok || v.SeqNum < seq || v.PutAppendReply.Err == ErrRetry || v.GetReply.Err == ErrRetry { // allow to retry
 					reply := new(CachedReply)
 					kv.applyCommand(reply, command)
 					kv.dup[id] = *reply
@@ -439,7 +439,7 @@ func (kv *ShardKV) applyInstallShardCommand(op Op) {
 	DPrintf("ShardKV %v gid %v apply InstallShardCommand cur:%v new:%v", kv.me, kv.gid, kv.curConfigNum[op.InstallShard.ShardKey.Shard], op.InstallShard.ShardKey.Num)
 	if kv.curConfigNum[op.InstallShard.ShardKey.Shard] < op.InstallShard.ShardKey.Num {
 		kv.curConfigNum[op.InstallShard.ShardKey.Shard] = op.InstallShard.ShardKey.Num
-		kv.mp[op.InstallShard.ShardKey] = op.InstallShard.Shard
+		kv.mp[op.InstallShard.ShardKey] = kv.copyShard(op.InstallShard.Shard) // race condition here
 		DPrintf("kv.mp:%v", kv.mp)
 	}
 	// dead lock here before
@@ -449,7 +449,9 @@ func (kv *ShardKV) sendInstallShard(key ShardKey, shard Shard) {
 	args.ShardKey = key
 	args.Shard = shard
 	gid := shard.Gid
-	config := kv.clerk.Query(key.Num)
+	kv.mu.Lock()
+	config := kv.config
+	kv.mu.Unlock()
 	servers, ok := config.Groups[gid]
 	if !ok {
 		DPrintf("%v %v %v", config.Groups, config.Num, config.Shards)
@@ -507,6 +509,7 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e.Encode(kv.config)
 	e.Encode(kv.curConfigNum)
 	e.Encode(kv.sendMap)
+	e.Encode(kv.sent)
 	return w.Bytes()
 }
 func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
@@ -519,6 +522,7 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	d.Decode(&kv.config)
 	d.Decode(&kv.curConfigNum)
 	d.Decode(&kv.sendMap)
+	d.Decode(&kv.sent)
 }
 
 func (kv *ShardKV) handleSnapshotMsg(applyMsg raft.ApplyMsg) {

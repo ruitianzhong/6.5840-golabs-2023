@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -29,14 +30,18 @@ const (
 
 var start time.Time
 var debugVerbosity int
+var mu sync.Mutex
 
 func InitLog() {
 	start = time.Now()
+	mu.Lock()
 	debugVerbosity = getVerbosity()
+	mu.Unlock()
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
 func RaftDebug(topic LogTopic, format string, a ...interface{}) {
+	mu.Lock()
 	if debugVerbosity >= 1 {
 		time := time.Since(start).Microseconds()
 		time /= 100
@@ -44,6 +49,7 @@ func RaftDebug(topic LogTopic, format string, a ...interface{}) {
 		format = pattern + format
 		log.Printf(format, a...)
 	}
+	mu.Unlock()
 }
 
 func getVerbosity() int {
