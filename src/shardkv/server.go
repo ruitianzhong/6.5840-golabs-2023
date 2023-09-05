@@ -376,10 +376,8 @@ func (kv *ShardKV) applyCommand(reply *CachedReply, op Op) {
 					reply.GetReply.Err = ErrNoKey
 				}
 				s.Result[op.ClientId] = *reply
-				DPrintf("Err1:%v", reply.GetReply.Err)
 			} else {
 				*reply = e
-				DPrintf("Err:%v", e.GetReply.Err)
 			}
 		} else {
 			reply.GetReply.Err = ErrRetry
@@ -405,9 +403,10 @@ func (kv *ShardKV) applyConfigCommand(op Op) {
 		oc, nc := kv.config, op.Config
 		for i := 0; i < shardctrler.NShards; i++ {
 			if oc.Shards[i] == kv.gid && nc.Shards[i] != kv.gid {
-				key := ShardKey{Num: nc.Num, Shard: i}
+				key := ShardKey{Num: oc.Num, Shard: i}
 				s := kv.copyShard(kv.mp[key])
 				s.Gid = nc.Shards[i]
+				key.Num = nc.Num
 				kv.sendMap[key] = s
 				kv.sent++
 				DPrintf("ShardKV %v gid %v will install shard:%v num:%v", kv.me, kv.gid, key.Shard, key.Num)
@@ -453,7 +452,8 @@ func (kv *ShardKV) sendInstallShard(key ShardKey, shard Shard) {
 	config := kv.clerk.Query(key.Num)
 	servers, ok := config.Groups[gid]
 	if !ok {
-		panic("")
+		DPrintf("%v %v %v", config.Groups, config.Num, config.Shards)
+		panic(gid)
 	}
 	for {
 		for si := 0; si < len(servers); si++ {
@@ -487,7 +487,7 @@ func (kv *ShardKV) copyShard(shard Shard) Shard {
 	}
 	nshard.Result = result
 	nshard.KVMap = kvmap
-	DPrintf("ShardKV %v gid %v kv.mp:%v nshard.KVMap:%v", kv.me, kv.gid, kv.mp, kvmap)
+	DPrintf("ShardKV %v gid %v kv.mp:%v nshard.KVMap:%v shard.KVMap %v", kv.me, kv.gid, kv.mp, kvmap, shard.KVMap)
 	return nshard
 }
 
@@ -549,8 +549,6 @@ func (kv *ShardKV) initSnapshot() {
 func (kv *ShardKV) updateConfig() {
 	for !kv.killed() {
 		kv.mu.Lock()
-		DPrintf("ShardKV %v gid %v prepare to ask for config current configNum %v", kv.me, kv.gid, kv.config.Num)
-
 		newConfig := kv.clerk.Query(kv.config.Num + 1)
 		DPrintf("ShardKV %v gid %v  get config Num %v shard %v", kv.me, kv.gid, newConfig.Num, newConfig.Shards)
 

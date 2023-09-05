@@ -83,6 +83,7 @@ func (ck *Clerk) Get(key string) string {
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					ck.seqNumber++
+					DPrintf("Clent %v Get key %v value %v", ck.clientId, key, reply.Value)
 					return reply.Value
 				}
 				DPrintf("Client %v seq %v failed to Get key %v due to %v ok:%v", ck.clientId, ck.seqNumber, args.Key, reply.Err, ok)

@@ -1,6 +1,7 @@
 package shardctrler
 
 import (
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -9,6 +10,15 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raft"
 )
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 const wait = 1 * time.Millisecond
 
@@ -267,6 +277,7 @@ func (sc *ShardCtrler) applyJoin(op Op) {
 	sc.ngroup += len(args.Servers)
 	sc.rebalance(&config)
 	sc.configs = append(sc.configs, config)
+	DPrintf("Ctrl %v JOIN new config:%v", sc.me, config.Shards)
 
 }
 
@@ -289,7 +300,7 @@ func (sc *ShardCtrler) applyLeave(op Op) {
 	sc.ngroup -= len(args.GIDs)
 	sc.rebalance(&config)
 	sc.configs = append(sc.configs, config)
-
+	DPrintf("Ctrl %v LEAVE new config:%v", sc.me, config.Shards)
 }
 
 func (sc *ShardCtrler) applyQuery(op Op) {
