@@ -30,7 +30,6 @@ const (
 	APPEND       OpType = "Append"
 	CONFIG       OpType = "Config"
 	InstallShard OpType = "InstallShard"
-	DeleteShard  OpType = "DeleteShard"
 )
 
 type Op struct {
@@ -43,9 +42,8 @@ type Op struct {
 	ClientId  int64
 	SeqNum    int
 
-	Config          shardctrler.Config
-	InstallShard    InstallShardArgs
-	DeleteShardArgs DeleteShardArgs
+	Config           shardctrler.Config
+	InstallShardArgs InstallShardArgs
 }
 
 type CachedReply struct {
@@ -75,28 +73,32 @@ type ShardKV struct {
 
 	curConfigNum [shardctrler.NShards]int
 
-	sent int
-
-	sendMap map[ShardKey]Shard
+	request    []ShardKey
+	dst        []int
+	prevConfig shardctrler.Config
 }
 
 type Shard struct {
 	KVMap  map[string]string
 	Result map[int64]CachedReply
-	Gid    int
 }
 
 type ShardKey struct {
 	Shard, Num int
 }
 
-type InstallShardArgs struct {
+type RequestShardArgs struct {
 	ShardKey ShardKey
-	Shard    Shard
 }
 
-type InstallShardReply struct {
-	Err Err
+type InstallShardArgs struct {
+	Key   ShardKey
+	Shard Shard
+}
+
+type RequestShardReply struct {
+	Err   Err
+	Shard Shard
 }
 
 type DeleteShardArgs struct {
@@ -116,11 +118,12 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Lock()
 		if kv.checkKey(args.Key) {
 			reply.Err = ErrWrongGroup
+			DPrintf("Client %v gid %v num %v", kv.me, kv.gid, kv.config.Num)
 			kv.mu.Unlock()
 			return
 		}
 		kv.mu.Unlock()
-		DPrintf("Client %v gid %v shard %v mp:%v", kv.me, kv.gid, key2shard(args.Key), kv.mp)
+		DPrintf("Client %v gid %v shard %v Get %v", kv.me, kv.gid, key2shard(args.Key), args.Key)
 		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			reply.Err = ErrWrongLeader
@@ -155,10 +158,12 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Lock() // quickly return ErrWrongGroup
 		if kv.checkKey(args.Key) {
 			reply.Err = ErrWrongGroup
+			DPrintf("Client %v gid %v num %v", kv.me, kv.gid, kv.config.Num)
+
 			kv.mu.Unlock()
 			return
 		}
-		DPrintf("Client %v gid %v shard %v mp:%v", kv.me, kv.gid, key2shard(args.Key), kv.mp)
+		DPrintf("Client %v gid %v shard %v ", kv.me, kv.gid, key2shard(args.Key))
 		kv.mu.Unlock()
 		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
@@ -247,17 +252,14 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.rf.SetGid(gid)
 	kv.config.Groups = make(map[int][]string)
-	kv.dup = make(map[int64]CachedReply)
-	kv.mp = map[ShardKey]Shard{}
 	kv.persister = persister
-	kv.sendMap = map[ShardKey]Shard{}
 	// You may need initialization code here.
 	kv.initSnapshot()
 	kv.maxraftstate = maxraftstate
 	DPrintf("ShardServer %v gid %v starting lastApplyIndex:%v", kv.me, kv.gid, kv.lastApplyIndex)
 	go kv.rxMsg()
 	go kv.updateConfig()
-	go kv.sendShard()
+	go kv.requestShard()
 	return kv
 }
 
@@ -282,8 +284,8 @@ func (kv *ShardKV) rxMsg() {
 				kv.applyConfigCommand(command)
 			} else if command.OpType == InstallShard {
 				kv.applyInstallShardCommand(command)
-			} else if command.OpType == DeleteShard {
-				kv.applyDeleteShardCommand(command)
+			} else {
+				panic("")
 			}
 
 			DPrintf("ShardServer %v gid %v apply index:%v command:%v", kv.me, kv.gid, msg.CommandIndex, msg.Command)
@@ -299,21 +301,6 @@ func (kv *ShardKV) rxMsg() {
 		kv.mu.Lock()
 		kv.checkIfNeedSnapshot()
 		kv.mu.Unlock()
-	}
-
-}
-
-func (kv *ShardKV) applyDeleteShardCommand(op Op) {
-
-	key := op.DeleteShardArgs.Key
-	_, ok := kv.mp[key]
-	DPrintf("KVShard %v gid %v prepare to delete num %v shard %v", kv.me, kv.gid, key.Num, key.Shard)
-	if ok {
-		delete(kv.mp, key)
-		key.Num++
-		delete(kv.sendMap, key)
-		kv.sent--
-		DPrintf("KVShard %v gid %v delete successfully num %v shard %v mp:%v", kv.me, kv.gid, key.Num, key.Shard, kv.mp)
 	}
 
 }
@@ -403,13 +390,7 @@ func (kv *ShardKV) applyConfigCommand(op Op) {
 		oc, nc := kv.config, op.Config
 		for i := 0; i < shardctrler.NShards; i++ {
 			if oc.Shards[i] == kv.gid && nc.Shards[i] != kv.gid {
-				key := ShardKey{Num: oc.Num, Shard: i}
-				s := kv.copyShard(kv.mp[key])
-				s.Gid = nc.Shards[i]
-				key.Num = nc.Num
-				kv.sendMap[key] = s
-				kv.sent++
-				DPrintf("ShardKV %v gid %v will install shard:%v num:%v", kv.me, kv.gid, key.Shard, key.Num)
+				DPrintf("ShardKV %v gid %v will accept request for shard:%v num:%v", kv.me, kv.gid, i, oc.Num)
 			} else if oc.Shards[i] == kv.gid && nc.Shards[i] == kv.gid {
 				key := ShardKey{Num: oc.Num, Shard: i}
 				shard, ok := kv.mp[key]
@@ -427,50 +408,68 @@ func (kv *ShardKV) applyConfigCommand(op Op) {
 				kv.mp[key] = shard
 				DPrintf("ShardKV %v gid %v init shard:%v num:%v", kv.me, kv.gid, key.Shard, key.Num)
 			} else if oc.Shards[i] != kv.gid && nc.Shards[i] == kv.gid {
-				DPrintf("ShardKV %v gid %v need shard %v from %v", kv.me, kv.gid, i, nc.Shards[i])
-
+				DPrintf("ShardKV %v gid %v need shard %v from %v", kv.me, kv.gid, i, oc.Shards[i])
+				key := ShardKey{Num: oc.Num, Shard: i}
+				kv.request = append(kv.request, key)
+				kv.dst = append(kv.dst, oc.Shards[i])
 			}
 		}
-
+		kv.prevConfig = kv.config
 		kv.config = op.Config
+		DPrintf("KVShard %v gid %v change from %v to %v", kv.me, kv.gid, oc.Num, nc.Num)
 	}
 }
 func (kv *ShardKV) applyInstallShardCommand(op Op) {
-	DPrintf("ShardKV %v gid %v apply InstallShardCommand cur:%v new:%v", kv.me, kv.gid, kv.curConfigNum[op.InstallShard.ShardKey.Shard], op.InstallShard.ShardKey.Num)
-	if kv.curConfigNum[op.InstallShard.ShardKey.Shard] < op.InstallShard.ShardKey.Num {
-		kv.curConfigNum[op.InstallShard.ShardKey.Shard] = op.InstallShard.ShardKey.Num
-		kv.mp[op.InstallShard.ShardKey] = kv.copyShard(op.InstallShard.Shard) // race condition here
-		DPrintf("kv.mp:%v", kv.mp)
+	DPrintf("ShardKV %v gid %v apply InstallShardCommand cur:%v new:%v", kv.me, kv.gid, kv.curConfigNum[op.InstallShardArgs.Key.Shard], op.InstallShardArgs.Key.Num)
+	if kv.curConfigNum[op.InstallShardArgs.Key.Shard] < op.InstallShardArgs.Key.Num {
+		kv.curConfigNum[op.InstallShardArgs.Key.Shard] = op.InstallShardArgs.Key.Num
+		kv.mp[op.InstallShardArgs.Key] = kv.copyShard(op.InstallShardArgs.Shard) // race condition here
+		len := len(kv.dst)
+		DPrintf("gid %v delete request %v %v", kv.gid, kv.request, op.InstallShardArgs.Key.Shard)
+		for i := 0; i < len; i++ {
+			if kv.request[i].Shard == op.InstallShardArgs.Key.Shard {
+				kv.request = append(kv.request[:i], kv.request[i+1:]...)
+				kv.dst = append(kv.dst[:i], kv.dst[i+1:]...)
+				break
+			}
+		}
+
 	}
 	// dead lock here before
 }
-func (kv *ShardKV) sendInstallShard(key ShardKey, shard Shard) {
-	args := InstallShardArgs{}
-	args.ShardKey = key
-	args.Shard = shard
-	gid := shard.Gid
-	kv.mu.Lock()
-	config := kv.config
-	kv.mu.Unlock()
-	servers, ok := config.Groups[gid]
-	if !ok {
-		DPrintf("%v %v %v", config.Groups, config.Num, config.Shards)
-		panic(gid)
-	}
-	for {
+func (kv *ShardKV) sendRequestShard(key ShardKey, expectedConfig int, gid int) {
+
+	for !kv.killed() {
+		args := RequestShardArgs{}
+		args.ShardKey = key
+		kv.mu.Lock()
+		config := kv.config
+		if config.Num != expectedConfig {
+			DPrintf("gid %v expect:%v actual:%v", kv.gid, expectedConfig, config.Num)
+			return
+		}
+		servers, ok := kv.prevConfig.Groups[gid]
+		kv.mu.Unlock()
+		if !ok {
+			DPrintf("%v %v %v", config.Groups, config.Num, config.Shards)
+			panic(gid)
+		}
 		for si := 0; si < len(servers); si++ {
 			srv := kv.make_end(servers[si])
-			var reply InstallShardReply
-			ok := srv.Call("ShardKV.InstallShard", &args, &reply)
+			var reply RequestShardReply
+			ok := srv.Call("ShardKV.RequestShard", &args, &reply)
 			if ok && reply.Err == OK {
-				DPrintf("ShardKV %v gid %v successfully sent", kv.me, kv.gid)
-				darg := DeleteShardArgs{}
-				key.Num--
-				darg.Key = key
-				kv.deleteShard(&darg)
+				DPrintf("ShardKV %v gid %v successfully RequestShard num:%v shard:%v", kv.me, kv.gid, key.Num, key.Shard)
+				args.ShardKey.Num++
+				args := InstallShardArgs{Key: args.ShardKey, Shard: reply.Shard}
+				kv.installShard(&args)
 				return
 			}
-			DPrintf("ShardKV %v gid %v send to %v shard %v num %v failed due to %v", kv.me, kv.gid, gid, args.ShardKey.Shard, args.ShardKey.Num, reply.Err)
+			if ok && reply.Err == ErrNoShard {
+				DPrintf("ShardKV %v gid %v  RequestShard num:%v shard:%v NoShard", kv.me, kv.gid, key.Num, key.Shard)
+				return
+			}
+			DPrintf("ShardKV %v gid %v send to request %v shard %v num %v failed due to %v", kv.me, kv.gid, gid, args.ShardKey.Shard, args.ShardKey.Num, reply.Err)
 		}
 
 		time.Sleep(100 * time.Millisecond)
@@ -489,7 +488,6 @@ func (kv *ShardKV) copyShard(shard Shard) Shard {
 	}
 	nshard.Result = result
 	nshard.KVMap = kvmap
-	DPrintf("ShardKV %v gid %v kv.mp:%v nshard.KVMap:%v shard.KVMap %v", kv.me, kv.gid, kv.mp, kvmap, shard.KVMap)
 	return nshard
 }
 
@@ -508,8 +506,9 @@ func (kv *ShardKV) encodeSnapshot() []byte {
 	e.Encode(kv.lastApplyIndex)
 	e.Encode(kv.config)
 	e.Encode(kv.curConfigNum)
-	e.Encode(kv.sendMap)
-	e.Encode(kv.sent)
+	e.Encode(kv.request)
+	e.Encode(kv.dst)
+	e.Encode(kv.prevConfig)
 	return w.Bytes()
 }
 func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
@@ -521,8 +520,9 @@ func (kv *ShardKV) decodeSnapshot(snapshot []byte) {
 	d.Decode(&kv.lastApplyIndex)
 	d.Decode(&kv.config)
 	d.Decode(&kv.curConfigNum)
-	d.Decode(&kv.sendMap)
-	d.Decode(&kv.sent)
+	d.Decode(&kv.request)
+	d.Decode(&kv.dst)
+	d.Decode(&kv.prevConfig)
 }
 
 func (kv *ShardKV) handleSnapshotMsg(applyMsg raft.ApplyMsg) {
@@ -547,6 +547,9 @@ func (kv *ShardKV) initSnapshot() {
 	snapshot := kv.persister.ReadSnapshot()
 	if len(snapshot) > 0 {
 		kv.decodeSnapshot(snapshot)
+	} else {
+		kv.dup = make(map[int64]CachedReply)
+		kv.mp = map[ShardKey]Shard{}
 	}
 }
 
@@ -555,10 +558,8 @@ func (kv *ShardKV) updateConfig() {
 		kv.mu.Lock()
 		newConfig := kv.clerk.Query(kv.config.Num + 1)
 		DPrintf("ShardKV %v gid %v  get config Num %v shard %v", kv.me, kv.gid, newConfig.Num, newConfig.Shards)
-
-		DPrintf("ShardKV %v gid %v configNum %v shard:%v unsent %v recAll:%v", kv.me, kv.gid, kv.config.Num, kv.config.Shards, kv.sent, kv.checkReceivedAll())
 		oldConfig := kv.config
-		if oldConfig.Num == newConfig.Num || kv.sent != 0 || !kv.checkReceivedAll() {
+		if oldConfig.Num == newConfig.Num || len(kv.request) != 0 {
 			kv.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -566,7 +567,7 @@ func (kv *ShardKV) updateConfig() {
 		kv.mu.Unlock()
 
 		args := Op{OpType: CONFIG, Config: newConfig}
-		for {
+		for !kv.killed() {
 			_, _, isLeader := kv.rf.Start(args)
 			if !isLeader {
 				DPrintf("ShardKV %v gid %v is not leader", kv.me, kv.gid)
@@ -590,61 +591,22 @@ func (kv *ShardKV) updateConfig() {
 
 }
 
-func (kv *ShardKV) checkReceivedAll() bool {
-	for i, v := range kv.config.Shards {
-
-		if v == kv.gid {
-			k := ShardKey{Shard: i, Num: kv.config.Num}
-			_, ok := kv.mp[k]
-			if !ok {
-				return false
-			}
-		}
-	}
-	return true
-
-}
-
-func (kv *ShardKV) InstallShard(args *InstallShardArgs, reply *InstallShardReply) {
-
+func (kv *ShardKV) RequestShard(args *RequestShardArgs, reply *RequestShardReply) {
+	key := args.ShardKey
 	kv.mu.Lock()
-
-	if args.ShardKey.Num <= kv.curConfigNum[args.ShardKey.Shard] {
-		kv.mu.Unlock()
+	v, ok := kv.mp[key]
+	if ok {
+		reply.Shard = kv.copyShard(v)
 		reply.Err = OK
-		return
+	} else {
+		reply.Err = ErrNoShard
 	}
 	kv.mu.Unlock()
-	op := Op{}
-	op.OpType = InstallShard
-	op.InstallShard = *args
-	DPrintf("ShardKV %v gid %v InstallShard request started from %v", kv.me, kv.gid, args.Shard.Gid)
-
-	for {
-		_, _, isLeader := kv.rf.Start(op)
-		if !isLeader {
-			DPrintf("ShardKV %v gid %v InstallShard reject with ErrWrongLeader to %v", kv.me, kv.gid, args.Shard.Gid)
-			reply.Err = ErrWrongLeader
-			return
-		} else {
-			DPrintf("ShardKV %v gid %v InstallShard is leader request from %v", kv.me, kv.gid, args.Shard.Gid)
-		}
-		time.Sleep(100 * time.Millisecond)
-		kv.mu.Lock()
-		if args.ShardKey.Num <= kv.curConfigNum[args.ShardKey.Shard] {
-			kv.mu.Unlock()
-			DPrintf("ShardKV %v gid %v reply with OK", kv.me, kv.gid)
-			reply.Err = OK
-			return
-		}
-		kv.mu.Unlock()
-	}
-
 }
 
-func (kv *ShardKV) deleteShard(args *DeleteShardArgs) {
-	op := Op{OpType: DeleteShard, DeleteShardArgs: *args}
-	for {
+func (kv *ShardKV) installShard(args *InstallShardArgs) {
+	op := Op{OpType: InstallShard, InstallShardArgs: *args}
+	for !kv.killed() {
 		_, _, isLeader := kv.rf.Start(op)
 		if !isLeader {
 			time.Sleep(100 * time.Millisecond)
@@ -654,21 +616,20 @@ func (kv *ShardKV) deleteShard(args *DeleteShardArgs) {
 
 		kv.mu.Lock()
 		_, ok := kv.mp[args.Key]
-		if !ok {
+		if ok || kv.config.Num >= args.Key.Num {
 			kv.mu.Unlock()
 			return
 		}
 		kv.mu.Unlock()
-
 	}
 }
 
-func (kv *ShardKV) sendShard() {
-	for {
+func (kv *ShardKV) requestShard() {
+	for !kv.killed() {
 		kv.mu.Lock()
-		for k, v := range kv.sendMap {
-			DPrintf("KVServer %v gid %v start to send Num %v Shard %v", kv.me, kv.gid, k.Num, k.Shard)
-			go kv.sendInstallShard(k, v)
+		for i, v := range kv.request {
+			DPrintf("KVServer %v gid %v start to request Num %v Shard %v current configNum %v", kv.me, kv.gid, v.Num, v.Shard, kv.config.Num)
+			go kv.sendRequestShard(v, kv.config.Num, kv.dst[i])
 		}
 		kv.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
