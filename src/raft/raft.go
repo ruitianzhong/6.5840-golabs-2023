@@ -94,6 +94,8 @@ type Raft struct {
 	snapshot []byte // store the snapshot & raftState simultaneously
 
 	gid int
+
+	lastSnapshot int
 }
 
 type AppendEntriesArgs struct {
@@ -171,6 +173,12 @@ func (rf *Raft) raftState2Bytes() []byte {
 	return raftstate
 }
 
+func (rf *Raft) SnapshotIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.lastSnapshot
+}
+
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -181,6 +189,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log = make([]LogEntry, 1)
 		rf.log[0].Index = 0
 		rf.log[0].Term = 0
+		rf.lastSnapshot = -1
 		return
 	}
 	// Your code here (2C).
@@ -202,6 +211,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
 		rf.commitIndex = max(0, lastIncludedIndex)
+		rf.lastSnapshot = rf.lastIncludedIndex
 	}
 }
 
@@ -220,6 +230,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			rf.lastIncludedIndex = index
 			rf.snapshot = snapshot
 			rf.persist()
+			rf.lastSnapshot = index
 			RaftDebug(rSnapshotCreate, "Server %v gid %v create Snapshot lastIncludedIndex %v lastIncludedTerm %v len(snapshot):%v", rf.me, rf.gid, rf.lastIncludedIndex, rf.lastIncludedTerm, len(snapshot))
 		}
 	}()
