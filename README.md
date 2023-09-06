@@ -8,6 +8,7 @@
 - [X] Lab 3A
 - [X] Lab 3B
 - [X] Lab 4A
+- [X] Lab 4B
 
 ```shell
 time go test
