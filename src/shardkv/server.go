@@ -129,7 +129,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ErrWrongLeader
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		kv.mu.Lock()
 
 		k, ok := kv.dup[args.ClientId]
@@ -170,7 +170,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = ErrWrongLeader
 			return
 		}
-		time.Sleep(80 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		kv.mu.Lock()
 		k, ok := kv.dup[op.ClientId]
 		if ok {
@@ -275,7 +275,7 @@ func (kv *ShardKV) rxMsg() {
 			if command.OpType == GET || command.OpType == PUT || command.OpType == APPEND {
 				id, seq := command.ClientId, command.SeqNum
 				v, ok := kv.dup[id]
-				if !ok || v.SeqNum < seq || v.PutAppendReply.Err == ErrRetry || v.GetReply.Err == ErrRetry { // allow to retry
+				if !ok || v.SeqNum < seq || v.PutAppendReply.Err == ErrRetry || v.GetReply.Err == ErrRetry || v.PutAppendReply.Err == ErrWrongGroup || v.GetReply.Err == ErrWrongGroup { // allow to retry
 					reply := new(CachedReply)
 					kv.applyCommand(reply, command)
 					kv.dup[id] = *reply
@@ -318,7 +318,6 @@ func (kv *ShardKV) applyCommand(reply *CachedReply, op Op) {
 		key := ShardKey{Shard: shard, Num: kv.config.Num}
 		DPrintf("Client %v gid %v apply command shard:%v num:%v", kv.me, kv.gid, key.Shard, key.Num)
 		s, exist := kv.mp[key]
-		DPrintf("applyCommand %v", kv.mp)
 		if exist {
 			e, o := s.Result[op.ClientId]
 			if !o || e.SeqNum < op.SeqNum || e.PutAppendReply.Err == ErrRetry {
@@ -338,10 +337,7 @@ func (kv *ShardKV) applyCommand(reply *CachedReply, op Op) {
 			}
 		} else {
 			reply.PutAppendReply.Err = ErrRetry
-			DPrintf("ShardServer %v gid %v reply with ErrRetry to put/append shard:%v num:%v mp:%v", kv.me, kv.gid, key.Shard, key.Num, kv.mp)
-			for k := range kv.mp {
-				DPrintf("ShardServer %v gid %v have shard:%v num:%v", kv.me, kv.gid, k.Shard, k.Num)
-			}
+			DPrintf("ShardServer %v gid %v reply with ErrRetry to put/append shard:%v num:%v ", kv.me, kv.gid, key.Shard, key.Num)
 		}
 
 	} else if op.OpType == GET {
@@ -444,7 +440,7 @@ func (kv *ShardKV) sendRequestShard(key ShardKey, expectedConfig int, gid int) {
 		args.ShardKey = key
 		kv.mu.Lock()
 		config := kv.config
-		if config.Num != expectedConfig {
+		if config.Num != key.Num+1 {
 			DPrintf("gid %v expect:%v actual:%v", kv.gid, expectedConfig, config.Num)
 			return
 		}
@@ -452,6 +448,7 @@ func (kv *ShardKV) sendRequestShard(key ShardKey, expectedConfig int, gid int) {
 		kv.mu.Unlock()
 		if !ok {
 			DPrintf("%v %v %v", config.Groups, config.Num, config.Shards)
+			DPrintf("%v %v", kv.prevConfig.Num, kv.prevConfig.Shards)
 			panic(gid)
 		}
 		for si := 0; si < len(servers); si++ {
@@ -593,15 +590,22 @@ func (kv *ShardKV) updateConfig() {
 
 func (kv *ShardKV) RequestShard(args *RequestShardArgs, reply *RequestShardReply) {
 	key := args.ShardKey
-	kv.mu.Lock()
-	v, ok := kv.mp[key]
-	if ok {
-		reply.Shard = kv.copyShard(v)
-		reply.Err = OK
-	} else {
-		reply.Err = ErrNoShard
+	for {
+		kv.mu.Lock()
+		if kv.config.Num > key.Num {
+			v, ok := kv.mp[key]
+			if ok {
+				reply.Shard = kv.copyShard(v)
+				reply.Err = OK
+			} else {
+				reply.Err = ErrNoShard
+			}
+			kv.mu.Unlock()
+			return
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
-	kv.mu.Unlock()
 }
 
 func (kv *ShardKV) installShard(args *InstallShardArgs) {
